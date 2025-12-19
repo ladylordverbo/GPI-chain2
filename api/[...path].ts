@@ -46,15 +46,32 @@ export default async function handler(
   vercelRes: VercelResponse
 ) {
   try {
-    // Extract path
-    const pathArray = Array.isArray(vercelReq.query.path) 
-      ? vercelReq.query.path 
-      : vercelReq.query.path 
-        ? [vercelReq.query.path] 
-        : [];
+    // Extract path - handle Vercel's catch-all routing
+    // For /api/login, vercelReq.query.path should be 'login'
+    let pathArray: string[] = [];
+    
+    if (vercelReq.query.path) {
+      if (Array.isArray(vercelReq.query.path)) {
+        pathArray = vercelReq.query.path;
+      } else {
+        pathArray = [vercelReq.query.path];
+      }
+    }
+    
+    // Also check url for fallback (in case query.path is not set)
+    const url = vercelReq.url || '';
+    if (pathArray.length === 0 && url.includes('/api/')) {
+      const urlPath = url.split('/api/')[1]?.split('?')[0];
+      if (urlPath) {
+        pathArray = urlPath.split('/').filter(p => p);
+      }
+    }
     
     const path = '/' + pathArray.join('/');
     const method = vercelReq.method || 'GET';
+    
+    // Debug logging (can be removed in production)
+    console.log('API Route:', { path, method, queryPath: vercelReq.query.path, url });
 
     // Parse cookies
     const cookies = parseCookies(vercelReq.headers.cookie);
@@ -106,6 +123,14 @@ export default async function handler(
     const user = await authenticateJWT(req);
     if (user) {
       req.user = user;
+    }
+
+    // Handle OPTIONS for CORS preflight
+    if (method === 'OPTIONS') {
+      vercelRes.setHeader('Access-Control-Allow-Origin', '*');
+      vercelRes.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      vercelRes.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      return vercelRes.status(200).end();
     }
 
     // Route handlers
