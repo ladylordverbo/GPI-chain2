@@ -110,7 +110,7 @@ export default async function handler(
 
     // Route handlers
     // Auth routes - Login
-    if (path === '/api/login' && method === 'GET') {
+    if (path === '/login' && method === 'GET') {
       // OAuth login - redirect to Supabase OAuth
       const inviteToken = req.query.invite as string | undefined;
       const host = vercelReq.headers.host || 'localhost';
@@ -144,7 +144,7 @@ export default async function handler(
       return vercelRes.status(500).json({ error: 'OAuth initialization failed' });
     }
 
-    if (path === '/api/login' && method === 'POST') {
+    if (path === '/login' && method === 'POST') {
       // Email/password login
       const { email, password, invite } = req.body;
       
@@ -197,7 +197,7 @@ export default async function handler(
       }
     }
 
-    if (path === '/api/callback-token' && method === 'POST') {
+    if (path === '/callback-token' && method === 'POST') {
       // OAuth callback handler - receives token from client-side callback page
       const { access_token, refresh_token, invite } = req.body;
 
@@ -255,7 +255,7 @@ export default async function handler(
       }
     }
 
-    if (path === '/api/callback' && method === 'GET') {
+    if (path === '/callback' && method === 'GET') {
       // OAuth callback route (for code-based flow)
       const { code, error } = req.query;
 
@@ -316,7 +316,7 @@ export default async function handler(
       }
     }
 
-    if (path === '/api/logout' && method === 'GET') {
+    if (path === '/logout' && method === 'GET') {
       // Logout - clear JWT cookie
       vercelRes.setHeader('Set-Cookie', 'jwt=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0');
       return vercelRes.json({ success: true });
