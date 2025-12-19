@@ -6,6 +6,7 @@ import type { Express, RequestHandler } from 'express';
 import { storage } from './storage';
 import connectPg from 'connect-pg-simple';
 import crypto from 'crypto';
+import { generateToken } from './jwtAuth';
 
 const supabaseUrl = process.env.SUPABASE_URL!;
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY!;
@@ -382,7 +383,16 @@ export async function setupAuth(app: Express) {
           }
           console.log('[CALLBACK-TOKEN] SUCCESS: Session saved, redirecting to /');
           if (!res.headersSent) {
-            return res.json({ redirect: '/' });
+            // Generate JWT token for serverless compatibility
+            const jwtToken = generateToken(dbUser);
+            // Store token in cookie for serverless
+            res.cookie('jwt', jwtToken, {
+              httpOnly: true,
+              secure: process.env.NODE_ENV === 'production',
+              sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+              maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            });
+            return res.json({ redirect: '/', token: jwtToken });
           }
         });
       });
@@ -469,6 +479,15 @@ export async function setupAuth(app: Express) {
       // The database user ID is the source of truth
       req.logIn({ ...dbUser, email: userEmail }, (err) => {
         if (err) return next(err);
+        // Generate JWT token for serverless compatibility
+        const jwtToken = generateToken(dbUser);
+        // Store token in cookie for serverless
+        res.cookie('jwt', jwtToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
         return res.redirect('/');
       });
     } catch (err: any) {
@@ -509,7 +528,16 @@ export async function setupAuth(app: Express) {
 
       req.logIn(user, (err) => {
         if (err) return next(err);
-        return res.json({ success: true, user });
+        // Generate JWT token for serverless compatibility
+        const jwtToken = generateToken(user);
+        // Store token in cookie for serverless
+        res.cookie('jwt', jwtToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
+        return res.json({ success: true, user, token: jwtToken });
       });
     })(req, res, next);
   });
@@ -527,15 +555,44 @@ export async function setupAuth(app: Express) {
 }
 
 export const isAuthenticated: RequestHandler = async (req, res, next) => {
-  if (!req.isAuthenticated()) {
-    return res.status(401).json({ message: "Unauthorized" });
+  // Try Express session first
+  if (req.isAuthenticated()) {
+    return next();
   }
-  return next();
+  
+  // Fall back to JWT for serverless
+  try {
+    const { authenticateJWT } = await import('./jwtAuth');
+    const user = await authenticateJWT(req);
+    if (user) {
+      (req as any).user = user;
+      return next();
+    }
+  } catch (error) {
+    // JWT auth failed, continue to error
+  }
+  
+  return res.status(401).json({ message: "Unauthorized" });
 };
 
 export const requireLevel = (minLevel: number): RequestHandler => {
   return async (req, res, next) => {
-    const user = req.user as any;
+    let user = req.user as any;
+    
+    // If no user from Express session, try JWT
+    if (!user?.id) {
+      try {
+        const { authenticateJWT } = await import('./jwtAuth');
+        const jwtUser = await authenticateJWT(req);
+        if (jwtUser) {
+          user = jwtUser;
+          (req as any).user = jwtUser;
+        }
+      } catch (error) {
+        // JWT auth failed
+      }
+    }
+    
     if (!user?.id) {
       return res.status(401).json({ message: "Unauthorized" });
     }

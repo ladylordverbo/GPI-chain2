@@ -143,12 +143,26 @@ Good for global distribution, more complex setup.
 4. Add environment variables
 5. Deploy: `fly deploy`
 
-### Option 4: Vercel (Not Recommended)
+### Option 4: Vercel (Serverless)
 
-Vercel is designed for serverless functions, not Express apps. You'd need to:
-- Convert routes to serverless functions
-- Significant code changes required
-- Not worth it for this app
+Vercel is now supported with serverless functions. The app has been configured to work with Vercel's serverless architecture.
+
+**See**: [VERCEL_DEPLOYMENT.md](./VERCEL_DEPLOYMENT.md) for detailed instructions.
+
+**Quick Setup**:
+1. Connect your GitHub repo to Vercel
+2. Add environment variables in Vercel dashboard
+3. Deploy automatically on push
+
+**Pros**:
+- ✅ Free tier available
+- ✅ Automatic deployments from GitHub
+- ✅ Global CDN
+- ✅ Serverless scaling
+
+**Cons**:
+- ⚠️ Cold starts on first request
+- ⚠️ Some features require session storage (may need adjustments)
 
 ---
 

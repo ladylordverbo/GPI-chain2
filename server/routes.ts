@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { setupAuth, isAuthenticated, requireLevel, completeRegistration } from "./supabaseAuth";
 import { insertPromotionRequestSchema, insertVoteSchema, type User } from "@shared/schema";
 import { z } from "zod";
+import { generateToken } from "./jwtAuth";
 
 // Helper to get user ID from request (works with both Replit and Supabase auth)
 function getUserId(req: any): string {
@@ -194,7 +195,16 @@ export async function registerRoutes(
             console.error("Error logging in after registration:", err);
             return res.status(500).json({ message: "Registration succeeded but login failed" });
           }
-          return res.json({ success: true, user: result.user });
+          // Generate JWT token for serverless compatibility
+          const jwtToken = generateToken(result.user);
+          // Store token in cookie for serverless
+          res.cookie('jwt', jwtToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+          });
+          return res.json({ success: true, user: result.user, token: jwtToken });
         });
       } else {
         res.status(500).json({ message: "Registration failed: user not created" });
