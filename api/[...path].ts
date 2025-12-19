@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { authenticateJWT, requireLevelJWT } from '../server/jwtAuth';
 import { storage } from '../server/storage';
-import { completeRegistration } from '../server/supabaseAuth';
+import { completeRegistration, supabase, checkUserRegistration } from '../server/supabaseAuth';
 import { generateToken } from '../server/jwtAuth';
 import { insertPromotionRequestSchema, insertVoteSchema, type User } from '@shared/schema';
 import { z } from 'zod';
@@ -109,6 +109,219 @@ export default async function handler(
     }
 
     // Route handlers
+    // Auth routes - Login
+    if (path === '/api/login' && method === 'GET') {
+      // OAuth login - redirect to Supabase OAuth
+      const inviteToken = req.query.invite as string | undefined;
+      const host = vercelReq.headers.host || 'localhost';
+      const protocol = vercelReq.headers['x-forwarded-proto'] || 'https';
+      const redirectUrl = `${protocol}://${host}/callback.html`;
+      
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: redirectUrl,
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'consent',
+          },
+        },
+      });
+
+      if (error) {
+        return vercelRes.status(400).json({ error: error.message });
+      }
+
+      if (data?.url) {
+        // Store invite token in URL state or return it to client
+        // For serverless, we'll pass it via the redirect URL
+        const finalUrl = inviteToken 
+          ? `${data.url}&state=${encodeURIComponent(JSON.stringify({ invite: inviteToken }))}`
+          : data.url;
+        return vercelRes.redirect(finalUrl);
+      }
+
+      return vercelRes.status(500).json({ error: 'OAuth initialization failed' });
+    }
+
+    if (path === '/api/login' && method === 'POST') {
+      // Email/password login
+      const { email, password, invite } = req.body;
+      
+      if (!email || !password) {
+        return vercelRes.status(400).json({ message: 'Email and password are required' });
+      }
+
+      try {
+        // Authenticate with Supabase
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+
+        if (authError || !authData.user) {
+          return vercelRes.status(401).json({ message: authError?.message || 'Invalid credentials' });
+        }
+
+        // Get user from database
+        const dbUser = await storage.getUser(authData.user.id);
+        if (!dbUser) {
+          return vercelRes.status(404).json({ message: 'User not found in database' });
+        }
+
+        // Check registration status
+        const result = await checkUserRegistration(email, invite);
+        
+        if (result.error) {
+          return vercelRes.status(400).json({ message: result.error });
+        }
+
+        if (result.pending) {
+          // User needs to complete registration
+          const jwtToken = generateToken({ 
+            id: authData.user.id, 
+            email: authData.user.email,
+            pendingRegistration: true 
+          });
+          vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+          return vercelRes.json({ pending: true, token: jwtToken });
+        }
+
+        // User is fully registered - generate JWT token
+        const jwtToken = generateToken({ ...dbUser, id: authData.user.id, email: authData.user.email });
+        vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+        return vercelRes.json({ success: true, user: dbUser, token: jwtToken });
+      } catch (error: any) {
+        console.error('Login error:', error);
+        return vercelRes.status(500).json({ message: error.message || 'Login failed' });
+      }
+    }
+
+    if (path === '/api/callback-token' && method === 'POST') {
+      // OAuth callback handler - receives token from client-side callback page
+      const { access_token, refresh_token, invite } = req.body;
+
+      if (!access_token) {
+        return vercelRes.status(400).json({ error: 'No access token provided' });
+      }
+
+      try {
+        // Set Supabase session
+        const { data: sessionData, error: sessionError } = await supabase.auth.setSession({
+          access_token,
+          refresh_token: refresh_token || '',
+        });
+
+        if (sessionError || !sessionData.user) {
+          return vercelRes.status(400).json({ error: sessionError?.message || 'Authentication failed' });
+        }
+
+        const userEmail = sessionData.user.email;
+        if (!userEmail) {
+          return vercelRes.status(400).json({ error: 'No email found in user profile' });
+        }
+
+        // Check registration status
+        const result = await checkUserRegistration(userEmail, invite);
+        
+        if (result.error) {
+          return vercelRes.status(400).json({ error: result.error });
+        }
+
+        if (result.pending) {
+          // User needs to complete registration
+          const jwtToken = generateToken({ 
+            id: sessionData.user.id, 
+            email: userEmail,
+            pendingRegistration: true 
+          });
+          vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+          return vercelRes.json({ pending: true, token: jwtToken });
+        }
+
+        // Get user from database
+        const dbUser = await storage.getUser(sessionData.user.id);
+        if (!dbUser) {
+          return vercelRes.status(404).json({ error: 'User not found in database' });
+        }
+
+        // User is fully registered - generate JWT token
+        const jwtToken = generateToken({ ...dbUser, id: sessionData.user.id, email: userEmail });
+        vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+        return vercelRes.json({ success: true, user: dbUser, token: jwtToken });
+      } catch (error: any) {
+        console.error('Callback token error:', error);
+        return vercelRes.status(500).json({ error: error.message || 'Authentication failed' });
+      }
+    }
+
+    if (path === '/api/callback' && method === 'GET') {
+      // OAuth callback route (for code-based flow)
+      const { code, error } = req.query;
+
+      if (error) {
+        return vercelRes.redirect(`/?error=${encodeURIComponent(error as string)}`);
+      }
+
+      if (!code) {
+        return vercelRes.redirect('/?error=No authorization code received');
+      }
+
+      try {
+        // Exchange code for session
+        const { data: sessionData, error: sessionError } = await supabase.auth.exchangeCodeForSession(code as string);
+
+        if (sessionError || !sessionData.user) {
+          return vercelRes.redirect(`/?error=${encodeURIComponent(sessionError?.message || 'Authentication failed')}`);
+        }
+
+        const userEmail = sessionData.user.email;
+        if (!userEmail) {
+          return vercelRes.redirect('/?error=No email found in user profile');
+        }
+
+        // Get invite token from query (for serverless, we can't use sessions)
+        const inviteToken = req.query.invite as string | undefined;
+
+        // Check registration status
+        const result = await checkUserRegistration(userEmail, inviteToken);
+        
+        if (result.error) {
+          return vercelRes.redirect(`/?error=${encodeURIComponent(result.error)}`);
+        }
+
+        if (result.pending) {
+          // New user needs to choose username - store in JWT
+          const jwtToken = generateToken({ 
+            id: sessionData.user.id, 
+            email: userEmail,
+            pendingRegistration: true 
+          });
+          vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+          return vercelRes.redirect('/?register=pending');
+        }
+
+        // Existing user - get from database
+        const dbUser = await storage.getUser(sessionData.user.id);
+        if (!dbUser) {
+          return vercelRes.redirect('/?error=User not found in database');
+        }
+
+        // Generate JWT token
+        const jwtToken = generateToken({ ...dbUser, email: userEmail });
+        vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+        return vercelRes.redirect('/');
+      } catch (err: any) {
+        return vercelRes.redirect(`/?error=${encodeURIComponent(err.message || 'Authentication failed')}`);
+      }
+    }
+
+    if (path === '/api/logout' && method === 'GET') {
+      // Logout - clear JWT cookie
+      vercelRes.setHeader('Set-Cookie', 'jwt=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0');
+      return vercelRes.json({ success: true });
+    }
+
     // Auth routes
     if (path === '/auth/user' && method === 'GET') {
       if (!user) {

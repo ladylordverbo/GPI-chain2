@@ -57,7 +57,7 @@ interface PendingRegistration {
   isFirstUser: boolean;
 }
 
-async function checkUserRegistration(email: string, inviteToken?: string): Promise<{ user: any, pending?: PendingRegistration, error?: string }> {
+export async function checkUserRegistration(email: string, inviteToken?: string): Promise<{ user: any, pending?: PendingRegistration, error?: string }> {
   const userCount = await storage.getUserCount();
   const isFirstUser = userCount === 0;
 
