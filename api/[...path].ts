@@ -395,10 +395,10 @@ export default async function handler(
     }
 
     if (path === '/logout' && method === 'GET') {
-      // Logout - clear JWT cookie
+      // Logout - clear JWT cookie and redirect to home
       vercelRes.setHeader('Set-Cookie', 'jwt=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0');
-      logRequest(method, path, 200, Date.now() - startTime);
-      return vercelRes.json({ success: true });
+      logRequest(method, path, 302, Date.now() - startTime);
+      return vercelRes.redirect('/');
     }
 
     // Auth routes

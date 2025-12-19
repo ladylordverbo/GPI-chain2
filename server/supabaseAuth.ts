@@ -549,7 +549,14 @@ export async function setupAuth(app: Express) {
   // Logout route
   app.get("/api/logout", (req, res) => {
     req.logout(() => {
-      res.json({ success: true });
+      // Clear JWT cookie
+      res.cookie('jwt', '', {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+        maxAge: 0,
+      });
+      res.redirect('/');
     });
   });
 }

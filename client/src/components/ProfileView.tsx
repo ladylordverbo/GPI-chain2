@@ -121,8 +121,16 @@ export default function ProfileView() {
     },
   });
 
-  const handleLogout = () => {
-    window.location.href = "/api/logout";
+  const handleLogout = async () => {
+    try {
+      // Clear auth state immediately
+      queryClient.setQueryData(["/api/auth/user"], null);
+      // Call logout endpoint which will clear cookie and redirect
+      window.location.href = "/api/logout";
+    } catch (error) {
+      // If logout fails, still redirect to home
+      window.location.href = "/";
+    }
   };
 
   const handlePromoteSubmit = () => {
