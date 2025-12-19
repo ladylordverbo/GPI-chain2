@@ -40,11 +40,39 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   }, {} as Record<string, string>);
 }
 
+// Helper function for structured logging
+function logRequest(method: string, path: string, statusCode?: number, duration?: number, error?: any) {
+  const timestamp = new Date().toISOString();
+  if (error) {
+    console.error(`[${timestamp}] ${method} ${path} ${statusCode || 'ERROR'} ${duration ? `in ${duration}ms` : ''}`, {
+      error: error.message,
+      stack: error.stack,
+      ...error
+    });
+  } else {
+    console.log(`[${timestamp}] ${method} ${path} ${statusCode || 'START'} ${duration ? `in ${duration}ms` : ''}`);
+  }
+}
+
+// Helper to log and return response
+function logAndReturn(vercelRes: VercelResponse, method: string, path: string, startTime: number, statusCode: number, data?: any) {
+  const duration = Date.now() - startTime;
+  logRequest(method, path, statusCode, duration);
+  if (data !== undefined) {
+    return vercelRes.status(statusCode).json(data);
+  }
+  return vercelRes.status(statusCode).end();
+}
+
 // Main handler
 export default async function handler(
   vercelReq: VercelRequest,
   vercelRes: VercelResponse
 ) {
+  const startTime = Date.now();
+  let path = '';
+  let method = '';
+  
   try {
     // Extract path - handle Vercel's catch-all routing
     // For /api/login, vercelReq.query.path should be 'login'
@@ -67,11 +95,22 @@ export default async function handler(
       }
     }
     
-    const path = '/' + pathArray.join('/');
-    const method = vercelReq.method || 'GET';
+    path = '/' + pathArray.join('/');
+    method = vercelReq.method || 'GET';
     
-    // Debug logging (can be removed in production)
-    console.log('API Route:', { path, method, queryPath: vercelReq.query.path, url });
+    // Log incoming request
+    logRequest(method, path);
+    console.log('Request details:', { 
+      path, 
+      method, 
+      queryPath: vercelReq.query.path, 
+      url,
+      headers: {
+        host: vercelReq.headers.host,
+        'user-agent': vercelReq.headers['user-agent'],
+        'content-type': vercelReq.headers['content-type']
+      }
+    });
 
     // Parse cookies
     const cookies = parseCookies(vercelReq.headers.cookie);
@@ -130,6 +169,7 @@ export default async function handler(
       vercelRes.setHeader('Access-Control-Allow-Origin', '*');
       vercelRes.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       vercelRes.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      logRequest(method, path, 200, Date.now() - startTime);
       return vercelRes.status(200).end();
     }
 
@@ -155,6 +195,7 @@ export default async function handler(
       });
 
       if (error) {
+        logRequest(method, path, 400, Date.now() - startTime, error);
         return vercelRes.status(400).json({ error: error.message });
       }
 
@@ -164,9 +205,11 @@ export default async function handler(
         const finalUrl = inviteToken 
           ? `${data.url}&state=${encodeURIComponent(JSON.stringify({ invite: inviteToken }))}`
           : data.url;
+        logRequest(method, path, 302, Date.now() - startTime);
         return vercelRes.redirect(finalUrl);
       }
 
+      logRequest(method, path, 500, Date.now() - startTime);
       return vercelRes.status(500).json({ error: 'OAuth initialization failed' });
     }
 
@@ -210,14 +253,18 @@ export default async function handler(
             pendingRegistration: true 
           });
           vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+          logRequest(method, path, 200, Date.now() - startTime);
           return vercelRes.json({ pending: true, token: jwtToken });
         }
 
         // User is fully registered - generate JWT token
         const jwtToken = generateToken({ ...dbUser, id: authData.user.id, email: authData.user.email });
         vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+        logRequest(method, path, 200, Date.now() - startTime);
         return vercelRes.json({ success: true, user: dbUser, token: jwtToken });
       } catch (error: any) {
+        const duration = Date.now() - startTime;
+        logRequest(method, path, 500, duration, error);
         console.error('Login error:', error);
         return vercelRes.status(500).json({ message: error.message || 'Login failed' });
       }
@@ -262,20 +309,25 @@ export default async function handler(
             pendingRegistration: true 
           });
           vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+          logRequest(method, path, 200, Date.now() - startTime);
           return vercelRes.json({ pending: true, token: jwtToken });
         }
 
         // Get user from database
         const dbUser = await storage.getUser(sessionData.user.id);
         if (!dbUser) {
+          logRequest(method, path, 404, Date.now() - startTime);
           return vercelRes.status(404).json({ error: 'User not found in database' });
         }
 
         // User is fully registered - generate JWT token
         const jwtToken = generateToken({ ...dbUser, id: sessionData.user.id, email: userEmail });
         vercelRes.setHeader('Set-Cookie', `jwt=${jwtToken}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=${7 * 24 * 60 * 60}`);
+        logRequest(method, path, 200, Date.now() - startTime);
         return vercelRes.json({ success: true, user: dbUser, token: jwtToken });
       } catch (error: any) {
+        const duration = Date.now() - startTime;
+        logRequest(method, path, 500, duration, error);
         console.error('Callback token error:', error);
         return vercelRes.status(500).json({ error: error.message || 'Authentication failed' });
       }
@@ -345,16 +397,19 @@ export default async function handler(
     if (path === '/logout' && method === 'GET') {
       // Logout - clear JWT cookie
       vercelRes.setHeader('Set-Cookie', 'jwt=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0');
+      logRequest(method, path, 200, Date.now() - startTime);
       return vercelRes.json({ success: true });
     }
 
     // Auth routes
     if (path === '/auth/user' && method === 'GET') {
       if (!user) {
+        logRequest(method, path, 401, Date.now() - startTime);
         return vercelRes.status(401).json({ message: "Unauthorized" });
       }
       const dbUser = await storage.getUserWithInviter(user.id);
       if (!dbUser) {
+        logRequest(method, path, 404, Date.now() - startTime);
         return vercelRes.status(404).json({ message: "User not found" });
       }
       const invitees = await storage.getInvitees(user.id);
@@ -362,6 +417,7 @@ export default async function handler(
       const sanitizedInviter = dbUser.inviter && dbUser.inviter.level <= dbUser.level 
         ? sanitizeUser(dbUser.inviter, dbUser.level)
         : undefined;
+      logRequest(method, path, 200, Date.now() - startTime);
       return vercelRes.json({
         ...dbUser,
         inviter: sanitizedInviter,
@@ -842,9 +898,17 @@ export default async function handler(
     }
 
     // 404 for unmatched routes
+    const duration = Date.now() - startTime;
+    logRequest(method, path, 404, duration);
     return vercelRes.status(404).json({ message: 'Route not found' });
   } catch (error: any) {
-    console.error('Serverless handler error:', error);
+    const duration = Date.now() - startTime;
+    logRequest(method, path || 'unknown', 500, duration, error);
+    console.error('Serverless handler error:', {
+      message: error.message,
+      stack: error.stack,
+      error: error
+    });
     return vercelRes.status(500).json({ message: error.message || 'Internal server error' });
   }
 }
