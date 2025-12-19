@@ -1,21 +1,7 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "api/login.ts",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/[...path].ts",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "package.json",
-      "use": "@vercel/static-build",
-      "config": {
-        "distDir": "dist/public"
-      }
-    }
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ],
   "headers": [
     {

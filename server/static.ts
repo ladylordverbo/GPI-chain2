@@ -3,6 +3,11 @@ import fs from "fs";
 import path from "path";
 
 export function serveStatic(app: Express) {
+  // Skip static file serving on Vercel - Vercel handles static files directly
+  if (process.env.VERCEL) {
+    return;
+  }
+
   // In production (bundled to CommonJS), the bundled file is at dist/index.cjs
   // and static files are at dist/public/. 
   // Since we know the structure, we can resolve from process.cwd() which should
