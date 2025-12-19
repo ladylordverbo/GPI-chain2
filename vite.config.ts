@@ -7,53 +7,8 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Conditionally import Replit plugins only if REPL_ID is set
-// These plugins are optional and only work in Replit environment
-async function getReplitPlugins() {
-  const plugins: any[] = [];
-  
-  // Runtime error overlay - try to load, but don't fail if unavailable
-  try {
-    if (process.env.REPL_ID) {
-      const runtimeErrorOverlay = await import("@replit/vite-plugin-runtime-error-modal");
-      plugins.push(runtimeErrorOverlay.default());
-    }
-  } catch (e) {
-    // Plugin not available outside Replit - that's okay
-  }
-  
-  // Cartographer and dev banner - only in development with REPL_ID
-  if (process.env.NODE_ENV !== "production" && process.env.REPL_ID !== undefined) {
-    try {
-      const cartographer = await import("@replit/vite-plugin-cartographer");
-      plugins.push(cartographer.cartographer());
-    } catch (e) {
-      // Plugin not available - that's okay
-    }
-    
-    try {
-      const devBanner = await import("@replit/vite-plugin-dev-banner");
-      plugins.push(devBanner.devBanner());
-    } catch (e) {
-      // Plugin not available - that's okay
-    }
-  }
-  
-  return plugins;
-}
-
-// Note: Vite config can't use top-level await in TypeScript check
-// This will work at runtime but may show errors in type checking
-const replitPluginsPromise = getReplitPlugins();
-
-export default defineConfig(async () => {
-  const replitPlugins = await replitPluginsPromise;
-  
-  return {
-  plugins: [
-    react(),
-    ...replitPlugins,
-  ],
+export default defineConfig({
+  plugins: [react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "client", "src"),
@@ -72,5 +27,4 @@ export default defineConfig(async () => {
       deny: ["**/.*"],
     },
   },
-  };
 });
