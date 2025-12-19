@@ -20,7 +20,10 @@ export async function setupVite(server: Server, app: Express) {
     allowedHosts: true as const,
   };
 
-  const config = await (viteConfig as () => Promise<any>)();
+  // Handle both function and object config exports
+  const config = typeof viteConfig === "function" 
+    ? await viteConfig() 
+    : viteConfig;
   const vite = await createViteServer({
     ...config,
     configFile: false,
