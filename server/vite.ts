@@ -4,7 +4,12 @@ import { type Server } from "http";
 import viteConfig from "../vite.config";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
 import { nanoid } from "nanoid";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const viteLogger = createLogger();
 
@@ -15,8 +20,9 @@ export async function setupVite(server: Server, app: Express) {
     allowedHosts: true as const,
   };
 
+  const config = await (viteConfig as () => Promise<any>)();
   const vite = await createViteServer({
-    ...viteConfig,
+    ...config,
     configFile: false,
     customLogger: {
       ...viteLogger,
@@ -31,12 +37,28 @@ export async function setupVite(server: Server, app: Express) {
 
   app.use(vite.middlewares);
 
+  // Serve callback.html directly if requested
+  app.get("/callback.html", async (req, res, next) => {
+    try {
+      const callbackPath = path.resolve(
+        __dirname,
+        "..",
+        "client",
+        "callback.html",
+      );
+      const content = await fs.promises.readFile(callbackPath, "utf-8");
+      res.status(200).set({ "Content-Type": "text/html" }).end(content);
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.use("*", async (req, res, next) => {
     const url = req.originalUrl;
 
     try {
       const clientTemplate = path.resolve(
-        import.meta.dirname,
+        __dirname,
         "..",
         "client",
         "index.html",

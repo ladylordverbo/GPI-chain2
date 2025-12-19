@@ -1,9 +1,15 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupAuth, isAuthenticated, requireLevel, completeRegistration } from "./replitAuth";
+import { setupAuth, isAuthenticated, requireLevel, completeRegistration } from "./supabaseAuth";
 import { insertPromotionRequestSchema, insertVoteSchema, type User } from "@shared/schema";
 import { z } from "zod";
+
+// Helper to get user ID from request (works with both Replit and Supabase auth)
+function getUserId(req: any): string {
+  // Handle both Replit-style (claims.sub) and Supabase-style (id) user objects
+  return (req.user as any)?.claims?.sub || (req.user as any)?.id;
+}
 
 // Check if viewer can see target user (target level must be <= viewer level)
 function canViewerSeeUser(targetLevel: number, viewerLevel: number): boolean {
@@ -56,7 +62,18 @@ export async function registerRoutes(
   // Auth routes
   app.get("/api/auth/user", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.user.claims.sub;
+      // Handle both Replit-style (claims.sub) and Supabase-style (id) user objects
+      const userId = getUserId(req);
+      if (!userId) {
+        return res.status(401).json({ message: "User ID not found" });
+      }
+      
+      // If user has pending registration, return 401 but with a special flag
+      // The frontend will check pending-registration endpoint separately
+      if ((req.user as any)?.pendingRegistration || (req.session as any)?.pendingRegistration) {
+        return res.status(401).json({ message: "Registration pending", pending: true });
+      }
+      
       const user = await storage.getUserWithInviter(userId);
       if (!user) {
         return res.status(404).json({ message: "User not found" });
@@ -114,20 +131,32 @@ export async function registerRoutes(
 
   // Check pending registration status (requires session but not full auth since user may not be created yet)
   app.get("/api/auth/pending-registration", (req: any, res) => {
-    // Only return pending info if there is an authenticated session
+    // Check if there's a session (either Passport authenticated or just session data)
     if (!req.session) {
       return res.status(401).json({ message: "No session" });
     }
     
-    const pending = req.session?.pendingRegistration;
+    // Check both session data and user object for pending registration
+    const pending = req.session?.pendingRegistration || (req.user as any)?.pendingRegistration;
     if (!pending) {
       return res.json({ pending: false });
     }
+    
+    // If pending is in user object but not session, sync it
+    if ((req.user as any)?.pendingRegistration && !req.session.pendingRegistration) {
+      req.session.pendingRegistration = {
+        email: (req.user as any)?.email,
+        isFirstUser: true, // Default, will be set correctly in callback
+      };
+    }
+    
     res.json({
       pending: true,
       isFirstUser: pending.isFirstUser,
-      firstName: pending.claims?.first_name,
-      lastName: pending.claims?.last_name,
+      email: pending.email || (req.user as any)?.email,
+      // For backward compatibility, try to get name from email or leave undefined
+      firstName: pending.firstName,
+      lastName: pending.lastName,
     });
   });
 
@@ -144,15 +173,32 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Username is required" });
       }
 
-      const result = await completeRegistration(pending, username);
+      // Get Supabase user ID from session if available (from OAuth flow)
+      const supabaseUserId = (req.session as any).supabaseUserId;
+      const supabaseEmail = (req.session as any).supabaseEmail;
+      
+      const result = await completeRegistration(pending, username, undefined, supabaseUserId);
       if (result.error) {
         return res.status(400).json({ message: result.error });
       }
 
-      // Clear pending registration
+      // Clear pending registration and Supabase session data
       delete req.session.pendingRegistration;
+      delete (req.session as any).supabaseUserId;
+      delete (req.session as any).supabaseEmail;
 
-      res.json({ success: true, user: result.user });
+      // Auto-login the user after registration
+      if (result.user) {
+        req.logIn(result.user, (err: any) => {
+          if (err) {
+            console.error("Error logging in after registration:", err);
+            return res.status(500).json({ message: "Registration succeeded but login failed" });
+          }
+          return res.json({ success: true, user: result.user });
+        });
+      } else {
+        res.status(500).json({ message: "Registration failed: user not created" });
+      }
     } catch (error) {
       console.error("Error completing registration:", error);
       res.status(500).json({ message: "Failed to complete registration" });
@@ -184,7 +230,7 @@ export async function registerRoutes(
   app.patch("/api/users/:userId/username", isAuthenticated, async (req: any, res) => {
     try {
       const targetUserId = req.params.userId;
-      const currentUserId = req.user.claims.sub;
+      const currentUserId = getUserId(req);
       const { username } = req.body;
 
       // Get current user
@@ -228,7 +274,7 @@ export async function registerRoutes(
   
   app.get("/api/users", isAuthenticated, async (req: any, res) => {
     try {
-      const requestingUser = await storage.getUser(req.user.claims.sub);
+      const requestingUser = await storage.getUser(getUserId(req));
       if (!requestingUser) {
         return res.status(401).json({ message: "User not found" });
       }
@@ -249,7 +295,7 @@ export async function registerRoutes(
 
   app.get("/api/users/:id", isAuthenticated, async (req: any, res) => {
     try {
-      const requestingUser = await storage.getUser(req.user.claims.sub);
+      const requestingUser = await storage.getUser(getUserId(req));
       if (!requestingUser) {
         return res.status(401).json({ message: "User not found" });
       }
@@ -285,7 +331,7 @@ export async function registerRoutes(
 
   app.get("/api/users/:id/invitees", isAuthenticated, async (req: any, res) => {
     try {
-      const requestingUser = await storage.getUser(req.user.claims.sub);
+      const requestingUser = await storage.getUser(getUserId(req));
       if (!requestingUser) {
         return res.status(401).json({ message: "User not found" });
       }
@@ -332,7 +378,7 @@ export async function registerRoutes(
       const user = await storage.updateUserLevel(
         req.params.id,
         newLevel,
-        req.user.claims.sub,
+        getUserId(req),
         reason
       );
       res.json(user);
@@ -345,7 +391,7 @@ export async function registerRoutes(
   // Level 5 governance info endpoint - only visible to Level 5
   app.get("/api/level5-governance", isAuthenticated, async (req: any, res) => {
     try {
-      const requestingUser = await storage.getUser(req.user.claims.sub);
+      const requestingUser = await storage.getUser(getUserId(req));
       if (!requestingUser) {
         return res.status(401).json({ message: "User not found" });
       }
@@ -401,7 +447,7 @@ export async function registerRoutes(
       const user = await storage.updateUserLevel(
         candidateUserId,
         5,
-        req.user.claims.sub,
+        getUserId(req),
         `Bootstrap promotion to Level 5: ${reason}`
       );
       res.json(user);
@@ -415,7 +461,7 @@ export async function registerRoutes(
   
   app.get("/api/invites", isAuthenticated, async (req: any, res) => {
     try {
-      const links = await storage.getInviteLinksByUser(req.user.claims.sub);
+      const links = await storage.getInviteLinksByUser(getUserId(req));
       
       // Add invitee info for used links
       const linksWithDetails = await Promise.all(
@@ -438,7 +484,7 @@ export async function registerRoutes(
 
   app.post("/api/invites", isAuthenticated, async (req: any, res) => {
     try {
-      const link = await storage.createInviteLink(req.user.claims.sub);
+      const link = await storage.createInviteLink(getUserId(req));
       res.json(link);
     } catch (error) {
       console.error("Error creating invite:", error);
@@ -450,7 +496,7 @@ export async function registerRoutes(
   
   app.get("/api/promotions", isAuthenticated, async (req: any, res) => {
     try {
-      const requestingUser = await storage.getUser(req.user.claims.sub);
+      const requestingUser = await storage.getUser(getUserId(req));
       if (!requestingUser) {
         return res.status(401).json({ message: "User not found" });
       }
@@ -472,9 +518,9 @@ export async function registerRoutes(
           
           // Sanitize user data in the response (handle potential undefined users)
           // Filter out votes from higher-level users to prevent leaking their existence
-          const visibleVotes = (details.votes || []).filter(v => 
+          const visibleVotes = (details.votes || []).filter((v: any) => 
             v.voter && v.voter.level <= requestingUser.level
-          ).map(v => ({
+          ).map((v: any) => ({
             ...v,
             voter: sanitizeUser(v.voter!, requestingUser.level),
           }));
@@ -484,8 +530,8 @@ export async function registerRoutes(
             candidate: details.candidate ? sanitizeUser(details.candidate, requestingUser.level) : null,
             proposer: details.proposer ? sanitizeUser(details.proposer, requestingUser.level) : null,
             votes: visibleVotes,
-            votesFor: visibleVotes.filter(v => v.vote === "for").length,
-            votesAgainst: visibleVotes.filter(v => v.vote === "against").length,
+            votesFor: visibleVotes.filter((v: any) => v.vote === "for").length,
+            votesAgainst: visibleVotes.filter((v: any) => v.vote === "against").length,
           };
         })
       );
@@ -503,7 +549,7 @@ export async function registerRoutes(
 
   app.get("/api/promotions/:id", isAuthenticated, async (req: any, res) => {
     try {
-      const requestingUser = await storage.getUser(req.user.claims.sub);
+      const requestingUser = await storage.getUser(getUserId(req));
       if (!requestingUser) {
         return res.status(401).json({ message: "User not found" });
       }
@@ -520,9 +566,9 @@ export async function registerRoutes(
       
       // Sanitize user data (handle potential undefined users)
       // Filter out votes from higher-level users to prevent leaking their existence
-      const visibleVotes = (request.votes || []).filter(v => 
+      const visibleVotes = (request.votes || []).filter((v: any) => 
         v.voter && v.voter.level <= requestingUser.level
-      ).map(v => ({
+      ).map((v: any) => ({
         ...v,
         voter: sanitizeUser(v.voter!, requestingUser.level),
       }));
@@ -532,8 +578,8 @@ export async function registerRoutes(
         candidate: request.candidate ? sanitizeUser(request.candidate, requestingUser.level) : null,
         proposer: request.proposer ? sanitizeUser(request.proposer, requestingUser.level) : null,
         votes: visibleVotes,
-        votesFor: visibleVotes.filter(v => v.vote === "for").length,
-        votesAgainst: visibleVotes.filter(v => v.vote === "against").length,
+        votesFor: visibleVotes.filter((v: any) => v.vote === "for").length,
+        votesAgainst: visibleVotes.filter((v: any) => v.vote === "against").length,
       });
     } catch (error) {
       console.error("Error fetching promotion:", error);
@@ -544,7 +590,7 @@ export async function registerRoutes(
   app.post("/api/promotions", isAuthenticated, async (req: any, res) => {
     try {
       const requestType = req.body.requestType || "PROMOTE";
-      const userId = req.user.claims.sub;
+      const userId = getUserId(req);
       const creator = await storage.getUser(userId);
       
       if (!creator) {
@@ -643,7 +689,7 @@ export async function registerRoutes(
   app.post("/api/promotions/:id/vote", isAuthenticated, async (req: any, res) => {
     try {
       const promotionId = req.params.id;
-      const userId = req.user.claims.sub;
+      const userId = getUserId(req);
       const voter = await storage.getUser(userId);
       
       if (!voter) {
@@ -704,7 +750,7 @@ export async function registerRoutes(
   
   app.get("/api/stats", isAuthenticated, async (req: any, res) => {
     try {
-      const userId = req.user.claims.sub;
+      const userId = getUserId(req);
       const user = await storage.getUser(userId);
       if (!user) {
         return res.status(401).json({ message: "User not found" });

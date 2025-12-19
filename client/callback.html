@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Processing login...</title>
+</head>
+<body>
+  <div style="display: flex; align-items: center; justify-content: center; height: 100vh; font-family: system-ui;">
+    <div style="text-align: center;">
+      <p>Processing your login...</p>
+      <div style="margin-top: 20px;">
+        <div style="border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+      </div>
+    </div>
+  </div>
+  <style>
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+  <script type="module">
+    (async () => {
+      // Extract code or tokens from URL
+      const urlParams = new URLSearchParams(window.location.search);
+      const hashParams = new URLSearchParams(window.location.hash.substring(1));
+      
+      const code = urlParams.get('code');
+      const error = urlParams.get('error') || hashParams.get('error');
+      const accessToken = hashParams.get('access_token');
+      const refreshToken = hashParams.get('refresh_token');
+      
+      if (error) {
+        window.location.href = `/?error=${encodeURIComponent(error)}`;
+        return;
+      }
+      
+      if (code) {
+        // We have a code, redirect to server callback
+        console.log('[CALLBACK] Has code, redirecting to /api/callback');
+        window.location.href = `/api/callback?code=${code}`;
+      } else if (accessToken) {
+        // We have tokens in fragment, need to exchange them
+        // Send to server to handle
+        console.log('[CALLBACK] ===== Starting token exchange =====');
+        console.log('[CALLBACK] Access token present:', !!accessToken);
+        console.log('[CALLBACK] Refresh token present:', !!refreshToken);
+        console.log('[CALLBACK] Current URL:', window.location.href);
+        
+        try {
+          console.log('[CALLBACK] Sending POST to /api/callback-token...');
+          const res = await fetch('/api/callback-token', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              access_token: accessToken,
+              refresh_token: refreshToken || '',
+              token_type: hashParams.get('token_type'),
+              expires_in: hashParams.get('expires_in'),
+            }),
+          });
+          
+          console.log('[CALLBACK] Response received');
+          console.log('[CALLBACK] Response status:', res.status);
+          console.log('[CALLBACK] Response statusText:', res.statusText);
+          console.log('[CALLBACK] Response headers:', Object.fromEntries(res.headers.entries()));
+          
+          // Check if response has content before parsing JSON
+          const contentType = res.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            console.error('[CALLBACK] ERROR: Response is not JSON, status:', res.status);
+            const text = await res.text();
+            console.error('[CALLBACK] Response body:', text);
+            window.location.href = `/?error=${encodeURIComponent('Invalid server response')}`;
+            return;
+          }
+          
+          let data;
+          try {
+            const text = await res.text();
+            if (!text || text.trim().length === 0) {
+              console.error('[CALLBACK] ERROR: Empty response from server');
+              window.location.href = `/?error=${encodeURIComponent('Empty response from server')}`;
+              return;
+            }
+            data = JSON.parse(text);
+          } catch (parseErr) {
+            console.error('[CALLBACK] ERROR: Failed to parse JSON:', parseErr);
+            window.location.href = `/?error=${encodeURIComponent('Invalid JSON response')}`;
+            return;
+          }
+          
+          console.log('[CALLBACK] Response data:', data);
+          
+          if (data.error) {
+            console.error('[CALLBACK] ERROR from server:', data.error);
+            window.location.href = `/?error=${encodeURIComponent(data.error)}`;
+          } else if (data.redirect) {
+            console.log('[CALLBACK] Redirecting to:', data.redirect);
+            window.location.href = data.redirect;
+          } else {
+            console.log('[CALLBACK] No redirect specified, going to /');
+            window.location.href = '/';
+          }
+        } catch (err) {
+          console.error('[CALLBACK] EXCEPTION during fetch:', err);
+          console.error('[CALLBACK] Error details:', {
+            message: err.message,
+            stack: err.stack,
+            name: err.name,
+          });
+          window.location.href = `/?error=${encodeURIComponent('Authentication failed')}`;
+        }
+      } else {
+        window.location.href = '/?error=No authorization code or token received';
+      }
+    })();
+  </script>
+</body>
+</html>
+
