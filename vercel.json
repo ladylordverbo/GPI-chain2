@@ -17,16 +17,6 @@
       }
     }
   ],
-  "routes": [
-    {
-      "src": "^/api/login$",
-      "dest": "/api/login.ts"
-    },
-    {
-      "src": "^/api/(.*)$",
-      "dest": "/api/[...path].ts"
-    }
-  ],
   "headers": [
     {
       "source": "/api/(.*)",
