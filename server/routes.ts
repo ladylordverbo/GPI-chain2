@@ -1,15 +1,32 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupAuth, isAuthenticated, requireLevel, completeRegistration } from "./supabaseAuth";
-import { insertPromotionRequestSchema, insertVoteSchema, type User } from "@shared/schema";
+import { setupAuth, isAuthenticated, requireLevel, completeRegistration, getCookieSameSite } from "./supabaseAuth";
+import { insertPromotionRequestSchema, insertVoteSchema, selfDemotionRequestSchema, type User } from "@shared/schema";
 import { z } from "zod";
 import { generateToken } from "./jwtAuth";
 
 // Helper to get user ID from request (works with both Replit and Supabase auth)
-function getUserId(req: any): string {
-  // Handle both Replit-style (claims.sub) and Supabase-style (id) user objects
-  return (req.user as any)?.claims?.sub || (req.user as any)?.id;
+function getUserId(req: any): string | undefined {
+  // Try multiple locations for user ID
+  // 1. req.user.id (Supabase-style, most common)
+  if ((req.user as any)?.id) {
+    return (req.user as any).id;
+  }
+  // 2. req.user.claims.sub (Replit-style)
+  if ((req.user as any)?.claims?.sub) {
+    return (req.user as any).claims.sub;
+  }
+  // 3. req.session.passport.user.id (Passport session storage)
+  if ((req.session as any)?.passport?.user?.id) {
+    return (req.session as any).passport.user.id;
+  }
+  // 4. Direct session storage (fallback)
+  if ((req.session as any)?.userId) {
+    return (req.session as any).userId;
+  }
+  // Return undefined - caller should check session.supabaseUserId as final fallback
+  return undefined;
 }
 
 // Check if viewer can see target user (target level must be <= viewer level)
@@ -64,36 +81,95 @@ export async function registerRoutes(
   app.get("/api/auth/user", isAuthenticated, async (req: any, res) => {
     try {
       // Handle both Replit-style (claims.sub) and Supabase-style (id) user objects
-      const userId = getUserId(req);
+      let userId = getUserId(req);
+      
+      // Debug logging to understand user object structure
+      console.log(`[AUTH-USER] getUserId result:`, {
+        userId: userId || 'undefined',
+        hasUser: !!req.user,
+        userStructure: req.user ? {
+          hasId: !!(req.user as any).id,
+          hasClaims: !!(req.user as any).claims,
+          keys: Object.keys(req.user as any),
+        } : 'no user',
+        hasSupabaseUserId: !!(req.session as any).supabaseUserId,
+      });
+      
+      // Fallback: check multiple session locations if getUserId didn't work
       if (!userId) {
+        // Try supabaseUserId from session
+        if ((req.session as any).supabaseUserId) {
+          userId = (req.session as any).supabaseUserId;
+          console.log(`[AUTH-USER] Using Supabase user ID from session: ${userId}`);
+        }
+        // Try userId from session
+        else if ((req.session as any).userId) {
+          userId = (req.session as any).userId;
+          console.log(`[AUTH-USER] Using userId from session: ${userId}`);
+        }
+        // Try passport user from session
+        else if ((req.session as any)?.passport?.user?.id) {
+          userId = (req.session as any).passport.user.id;
+          console.log(`[AUTH-USER] Using userId from passport session: ${userId}`);
+        }
+      }
+      
+      if (!userId) {
+        console.error(`[AUTH-USER] ERROR: Could not find user ID anywhere:`, {
+          hasUser: !!req.user,
+          userKeys: req.user ? Object.keys(req.user as any) : [],
+          sessionKeys: req.session ? Object.keys(req.session as any) : [],
+          hasSupabaseUserId: !!(req.session as any).supabaseUserId,
+          hasUserId: !!(req.session as any).userId,
+          hasPassportUser: !!(req.session as any)?.passport?.user,
+        });
         return res.status(401).json({ message: "User ID not found" });
       }
       
-      // If user has pending registration, return 401 but with a special flag
-      // The frontend will check pending-registration endpoint separately
-      if ((req.user as any)?.pendingRegistration || (req.session as any)?.pendingRegistration) {
-        return res.status(401).json({ message: "Registration pending", pending: true });
-      }
-      
+      // Check if user exists in database first
       const user = await storage.getUserWithInviter(userId);
-      if (!user) {
-        return res.status(404).json({ message: "User not found" });
+      if (user) {
+        // User exists - clear any stale pending registration flags
+        if ((req.user as any)?.pendingRegistration || (req.session as any)?.pendingRegistration) {
+          console.log(`[AUTH-USER] User exists but has pending flags, clearing them`);
+          delete (req.session as any).pendingRegistration;
+          // Keep supabaseUserId as fallback - don't delete it
+          delete (req.session as any).supabaseEmail;
+          if (req.user) {
+            delete (req.user as any).pendingRegistration;
+          }
+          // Continue to return user (don't return 401)
+        }
+        
+        // Get additional stats - only count visible invitees
+        const invitees = await storage.getInvitees(userId);
+        const visibleInvitees = invitees.filter(inv => inv.level <= user.level);
+        
+        // Sanitize inviter if they are above current user's level (hide their existence)
+        const sanitizedInviter = user.inviter && user.inviter.level <= user.level 
+          ? sanitizeUser(user.inviter, user.level)
+          : undefined;
+        
+        return res.json({
+          ...user,
+          inviter: sanitizedInviter,
+          inviteCount: visibleInvitees.length,
+        });
       }
       
-      // Get additional stats - only count visible invitees
-      const invitees = await storage.getInvitees(userId);
-      const visibleInvitees = invitees.filter(inv => inv.level <= user.level);
+      // User doesn't exist - check for pending registration
+      // Return 200 (not 401) when registration is pending, so frontend knows user is authenticated
+      // but just needs to complete registration
+      if ((req.user as any)?.pendingRegistration || (req.session as any)?.pendingRegistration) {
+        return res.json({ 
+          message: "Registration pending", 
+          pending: true,
+          // Include user ID so frontend knows who is registering
+          userId: userId,
+        });
+      }
       
-      // Sanitize inviter if they are above current user's level (hide their existence)
-      const sanitizedInviter = user.inviter && user.inviter.level <= user.level 
-        ? sanitizeUser(user.inviter, user.level)
-        : undefined;
-      
-      res.json({
-        ...user,
-        inviter: sanitizedInviter,
-        inviteCount: visibleInvitees.length,
-      });
+      return res.status(404).json({ message: "User not found" });
     } catch (error) {
       console.error("Error fetching user:", error);
       res.status(500).json({ message: "Failed to fetch user" });
@@ -131,10 +207,53 @@ export async function registerRoutes(
   });
 
   // Check pending registration status (requires session but not full auth since user may not be created yet)
-  app.get("/api/auth/pending-registration", (req: any, res) => {
+  app.get("/api/auth/pending-registration", async (req: any, res) => {
     // Check if there's a session (either Passport authenticated or just session data)
     if (!req.session) {
       return res.status(401).json({ message: "No session" });
+    }
+    
+    let userId = getUserId(req);
+    // Fallback: check for Supabase user ID in session if getUserId didn't work
+    if (!userId && (req.session as any).supabaseUserId) {
+      userId = (req.session as any).supabaseUserId;
+      console.log(`[PENDING-REG-CHECK] Using Supabase user ID from session: ${userId}`);
+    }
+    
+    console.log(`[PENDING-REG-CHECK] Checking pending registration:`, {
+      hasSession: !!req.session,
+      userId: userId || 'none',
+      hasPendingInSession: !!req.session.pendingRegistration,
+      hasPendingInUser: !!(req.user as any)?.pendingRegistration,
+      supabaseUserId: (req.session as any).supabaseUserId || 'none',
+      userObject: req.user ? { id: (req.user as any)?.id, hasClaims: !!(req.user as any)?.claims } : 'none',
+    });
+    
+    // If user is authenticated and exists in database, they've completed registration
+    if (userId) {
+      try {
+        const user = await storage.getUser(userId);
+        console.log(`[PENDING-REG-CHECK] User lookup result:`, {
+          userId,
+          found: !!user,
+          username: user?.username,
+        });
+        if (user) {
+          // User exists in database, registration is complete
+          // Clear any stale pending registration flags
+          delete (req.session as any).pendingRegistration;
+          delete (req.session as any).supabaseUserId;
+          delete (req.session as any).supabaseEmail;
+          if (req.user) {
+            delete (req.user as any).pendingRegistration;
+          }
+          console.log(`[PENDING-REG-CHECK] User exists, returning pending: false`);
+          return res.json({ pending: false });
+        }
+      } catch (error) {
+        console.error("[PENDING-REG-CHECK] Error checking user in pending-registration:", error);
+        // Continue to check pending registration if error
+      }
     }
     
     // Check both session data and user object for pending registration
@@ -145,10 +264,23 @@ export async function registerRoutes(
     
     // If pending is in user object but not session, sync it
     if ((req.user as any)?.pendingRegistration && !req.session.pendingRegistration) {
+      const userCount = await storage.getUserCount();
+      const pendingFromUser = (req.user as any)?.pendingRegistration;
+      // Only first user (userCount === 0) doesn't need invite
+      // Second user and beyond need invites, but second user still gets level 5
+      const isFirstUser = pendingFromUser?.inviteToken ? false : (userCount === 0);
       req.session.pendingRegistration = {
         email: (req.user as any)?.email,
-        isFirstUser: true, // Default, will be set correctly in callback
+        inviteToken: pendingFromUser?.inviteToken,
+        invitedByUserId: pendingFromUser?.invitedByUserId,
+        isFirstUser: isFirstUser,
       };
+      console.log(`[SESSION-SYNC] Synced pending registration to session:`, {
+        email: req.session.pendingRegistration.email,
+        inviteToken: req.session.pendingRegistration.inviteToken ? 'present' : 'missing',
+        invitedByUserId: req.session.pendingRegistration.invitedByUserId || 'missing',
+        isFirstUser: req.session.pendingRegistration.isFirstUser,
+      });
     }
     
     res.json({
@@ -183,28 +315,98 @@ export async function registerRoutes(
         return res.status(400).json({ message: result.error });
       }
 
-      // Clear pending registration and Supabase session data
-      delete req.session.pendingRegistration;
-      delete (req.session as any).supabaseUserId;
-      delete (req.session as any).supabaseEmail;
-
       // Auto-login the user after registration
       if (result.user) {
-        req.logIn(result.user, (err: any) => {
+        console.log(`[COMPLETE-REG] Logging in user after registration:`, {
+          userId: result.user.id,
+          username: result.user.username,
+          email: result.user.email,
+        });
+        // Verify user object structure before logging in
+        console.log(`[COMPLETE-REG] User object structure before logIn:`, {
+          hasId: !!(result.user as any).id,
+          id: (result.user as any).id,
+          keys: Object.keys(result.user as any),
+        });
+        
+        // Ensure user object has id field explicitly set
+        const userForLogin = {
+          ...result.user,
+          id: result.user.id, // Explicitly ensure id is at top level
+        };
+        
+        // Also store userId directly in session as backup
+        (req.session as any).userId = result.user.id;
+        
+        req.logIn(userForLogin, (err: any) => {
           if (err) {
-            console.error("Error logging in after registration:", err);
+            console.error("[COMPLETE-REG] Error logging in after registration:", err);
             return res.status(500).json({ message: "Registration succeeded but login failed" });
           }
-          // Generate JWT token for serverless compatibility
-          const jwtToken = generateToken(result.user);
-          // Store token in cookie for serverless
-          res.cookie('jwt', jwtToken, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+          
+          // Verify user object structure after logging in
+          console.log(`[COMPLETE-REG] User object structure after logIn:`, {
+            hasUser: !!req.user,
+            hasId: !!(req.user as any)?.id,
+            id: (req.user as any)?.id,
+            hasClaims: !!(req.user as any)?.claims,
+            keys: req.user ? Object.keys(req.user as any) : [],
+            sessionUserId: (req.session as any)?.userId,
+            sessionPassportUserId: (req.session as any)?.passport?.user?.id,
           });
-          return res.json({ success: true, user: result.user, token: jwtToken });
+          
+          // Clear pending registration flags but KEEP supabaseUserId and userId as fallback
+          // These are needed as fallback for getUserId when req.user structure doesn't match
+          delete req.session.pendingRegistration;
+          // DON'T delete supabaseUserId or userId - they're needed as fallback for getUserId
+          delete (req.session as any).supabaseEmail;
+
+          // Also clear pendingRegistration from user object if it exists
+          if (req.user) {
+            delete (req.user as any).pendingRegistration;
+          }
+          
+          console.log(`[COMPLETE-REG] User logged in, saving session...`);
+          // Save session and THEN verify user exists
+          req.session.save((saveErr) => {
+            if (saveErr) {
+              console.error("[COMPLETE-REG] Error saving session after registration:", saveErr);
+              return res.status(500).json({ message: "Registration succeeded but session save failed" });
+            }
+            
+            console.log(`[COMPLETE-REG] Session saved, verifying user in database...`);
+            // Verify user exists in database after session is saved
+            storage.getUser(result.user.id).then((verifiedUser) => {
+              if (!verifiedUser) {
+                console.error("[COMPLETE-REG] ERROR: User not found in database after creation!");
+                return res.status(500).json({ message: "User created but not found in database" });
+              }
+              
+              // Double-check that pending registration is cleared (but keep supabaseUserId)
+              delete (req.session as any).pendingRegistration;
+              if (req.user) {
+                delete (req.user as any).pendingRegistration;
+              }
+              // Note: We intentionally keep supabaseUserId in session as fallback
+              
+              console.log(`[COMPLETE-REG] User verified in database, generating token...`);
+              // Generate JWT token for serverless compatibility
+              const jwtToken = generateToken(result.user);
+              // Store token in cookie for serverless
+              res.cookie('jwt', jwtToken, {
+                httpOnly: true,
+                secure: true, // Always secure on Vercel
+                sameSite: getCookieSameSite(), // Use 'lax' for same-domain
+                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+                path: '/', // Ensure cookie is available site-wide
+              });
+              console.log(`[COMPLETE-REG] Registration complete, returning success`);
+              return res.json({ success: true, user: result.user, token: jwtToken });
+            }).catch((verifyErr) => {
+              console.error("[COMPLETE-REG] Error verifying user:", verifyErr);
+              return res.status(500).json({ message: "Registration succeeded but verification failed" });
+            });
+          });
         });
       } else {
         res.status(500).json({ message: "Registration failed: user not created" });
@@ -395,6 +597,93 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error updating user level:", error);
       res.status(500).json({ message: "Failed to update user level" });
+    }
+  });
+
+  // Self-demotion endpoint (any member can demote themselves)
+  app.post("/api/users/self/demote", isAuthenticated, async (req: any, res) => {
+    try {
+      const { newLevel, reason } = req.body;
+      
+      // Validate required fields
+      if (newLevel === undefined || newLevel === null || !reason) {
+        return res.status(400).json({ message: "newLevel and reason are required" });
+      }
+      
+      // Convert newLevel to number and validate
+      const newLevelNum = typeof newLevel === 'string' ? parseInt(newLevel, 10) : Number(newLevel);
+      if (isNaN(newLevelNum) || !Number.isInteger(newLevelNum)) {
+        return res.status(400).json({ message: "newLevel must be a valid integer" });
+      }
+      
+      const userId = getUserId(req);
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      
+      // Validate: newLevel must be less than current level
+      if (newLevelNum >= user.level) {
+        return res.status(400).json({ message: "New level must be lower than your current level" });
+      }
+      
+      // Cannot demote to level 0 or below
+      if (newLevelNum < 1) {
+        return res.status(400).json({ message: "Level cannot be less than 1" });
+      }
+      
+      // Validate reason is a non-empty string
+      if (typeof reason !== 'string' || reason.trim().length === 0) {
+        return res.status(400).json({ message: "Reason must be a non-empty string" });
+      }
+      
+      // Validate using Zod schema for additional type safety
+      const trimmedReason = reason.trim();
+      try {
+        const validatedData = selfDemotionRequestSchema.parse({
+          newLevel: newLevelNum,
+          reason: trimmedReason,
+        });
+        
+        const updatedUser = await storage.updateUserLevel(
+          userId,
+          validatedData.newLevel,
+          userId, // Changed by themselves
+          `Self-demotion: ${validatedData.reason}`
+        );
+        res.json(updatedUser);
+      } catch (zodError) {
+        if (zodError instanceof z.ZodError) {
+          console.error("Self-demotion validation error:", {
+            newLevel: newLevelNum,
+            reasonLength: trimmedReason.length,
+            reason: trimmedReason.substring(0, 50), // First 50 chars for debugging
+            errors: zodError.errors,
+          });
+          
+          // Extract the first error message for the main message
+          const firstError = zodError.errors[0];
+          const errorMessage = firstError 
+            ? `${firstError.path.join('.')}: ${firstError.message}`
+            : "Validation failed";
+          
+          return res.status(400).json({ 
+            message: errorMessage,
+            errors: zodError.errors.map(e => ({
+              path: e.path.join('.'),
+              message: e.message,
+            }))
+          });
+        }
+        throw zodError;
+      }
+    } catch (error) {
+      console.error("Error in self-demotion:", error);
+      // Provide more specific error messages
+      if (error instanceof Error) {
+        return res.status(500).json({ message: error.message || "Failed to demote yourself" });
+      }
+      res.status(500).json({ message: "Failed to demote yourself" });
     }
   });
 

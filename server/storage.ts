@@ -15,7 +15,7 @@ import {
   type UserLevelHistory,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc, sql, count } from "drizzle-orm";
+import { eq, and, desc, sql, count, inArray } from "drizzle-orm";
 import { randomBytes } from "crypto";
 
 export interface IStorage {
@@ -76,18 +76,33 @@ export class DatabaseStorage implements IStorage {
   }
 
   async upsertUser(userData: UpsertUser): Promise<User> {
+    const updateSet: any = {
+      email: userData.email,
+      firstName: userData.firstName,
+      lastName: userData.lastName,
+      profileImageUrl: userData.profileImageUrl,
+      updatedAt: new Date(),
+    };
+    
+    // Only update level if it's provided in userData
+    if (userData.level !== undefined) {
+      updateSet.level = userData.level;
+    }
+    
+    // For new inserts, include invitedByUserId if provided
+    // For updates, only set invitedByUserId if it's not already set (preserve original inviter)
+    // We use a SQL expression to only update if current value is NULL
+    if (userData.invitedByUserId !== undefined) {
+      // Use SQL to conditionally update: only set if current value is NULL
+      updateSet.invitedByUserId = sql`COALESCE(${users.invitedByUserId}, ${userData.invitedByUserId})`;
+    }
+    
     const [user] = await db
       .insert(users)
       .values(userData)
       .onConflictDoUpdate({
         target: users.id,
-        set: {
-          email: userData.email,
-          firstName: userData.firstName,
-          lastName: userData.lastName,
-          profileImageUrl: userData.profileImageUrl,
-          updatedAt: new Date(),
-        },
+        set: updateSet,
       })
       .returning();
     return user;
@@ -120,7 +135,61 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getInvitees(userId: string): Promise<User[]> {
-    return db.select().from(users).where(eq(users.invitedByUserId, userId)).orderBy(desc(users.createdAt));
+    // Get users directly invited (via invited_by_user_id)
+    const directInvitees = await db
+      .select()
+      .from(users)
+      .where(eq(users.invitedByUserId, userId))
+      .orderBy(desc(users.createdAt));
+    
+    // Get invite links created by this user
+    const inviteLinks = await db
+      .select()
+      .from(inviteLinks)
+      .where(eq(inviteLinks.invitedByUserId, userId));
+    
+    // Get user IDs who used invite links created by this user
+    const usedLinkUserIds = inviteLinks
+      .filter(link => link.usedByUserId)
+      .map(link => link.usedByUserId!);
+    
+    // Get users from invite links (excluding those already in directInvitees)
+    let linkInvitees: User[] = [];
+    if (usedLinkUserIds.length > 0) {
+      // Use SQL IN clause to get users who used the invite links
+      const directInviteeIds = new Set(directInvitees.map(u => u.id));
+      const linkInviteesToFetch = usedLinkUserIds.filter(id => !directInviteeIds.has(id));
+      
+      if (linkInviteesToFetch.length > 0) {
+        linkInvitees = await db
+          .select()
+          .from(users)
+          .where(inArray(users.id, linkInviteesToFetch))
+          .orderBy(desc(users.createdAt));
+      }
+    }
+    
+    // Combine and deduplicate (directInvitees first, then linkInvitees)
+    const allInvitees = [...directInvitees];
+    const directInviteeIds = new Set(directInvitees.map(u => u.id));
+    for (const invitee of linkInvitees) {
+      if (!directInviteeIds.has(invitee.id)) {
+        allInvitees.push(invitee);
+      }
+    }
+    
+    // Log invite count calculation for debugging
+    console.log(`[INVITE-COUNT] getInvitees for userId ${userId}:`, {
+      directInviteesCount: directInvitees.length,
+      inviteLinksCount: inviteLinks.length,
+      usedLinkUserIdsCount: usedLinkUserIds.length,
+      linkInviteesCount: linkInvitees.length,
+      totalInviteesCount: allInvitees.length,
+      directInviteeIds: directInvitees.map(u => u.id),
+      linkInviteeIds: linkInvitees.map(u => u.id),
+    });
+    
+    return allInvitees;
   }
 
   async updateUserLevel(userId: string, newLevel: number, changedByUserId: string, reason: string): Promise<User> {
@@ -227,7 +296,9 @@ export class DatabaseStorage implements IStorage {
     const [link] = await db.select().from(inviteLinks).where(eq(inviteLinks.token, token));
     if (!link) throw new Error("Invite link not found");
     if (link.status !== "active") throw new Error("Invite link is not active");
-    if (link.maxUses && link.usesCount >= link.maxUses) throw new Error("Invite link has reached max uses");
+    if (link.maxUses && link.usesCount >= link.maxUses) {
+      throw new Error(`Invite link has reached maximum uses (${link.usesCount}/${link.maxUses})`);
+    }
 
     const newUsesCount = link.usesCount + 1;
     const newStatus = link.maxUses && newUsesCount >= link.maxUses ? "used" : "active";
@@ -241,6 +312,10 @@ export class DatabaseStorage implements IStorage {
       })
       .where(eq(inviteLinks.token, token))
       .returning();
+    
+    if (!updated) {
+      throw new Error("Failed to update invite link (link may have been modified concurrently)");
+    }
     
     return updated;
   }

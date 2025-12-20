@@ -23,7 +23,7 @@ interface PromotionCardProps {
   votesAgainst: number;
   requiredVotes: number;
   status: "open" | "approved" | "rejected" | "expired";
-  requestType?: "PROMOTE" | "PROMOTE_TO_5" | "DEMOTE_FROM_5";
+  requestType?: "PROMOTE" | "DEMOTE" | "PROMOTE_TO_5" | "DEMOTE_FROM_5";
   allowedVoterMinLevel?: number;
   hasVoted?: boolean;
   canVote?: boolean;
@@ -62,7 +62,7 @@ export default function PromotionCard({
   
   const progressPercent = requiredVotes > 0 ? Math.min((votesFor / requiredVotes) * 100, 100) : 0;
   const isLevel5Governance = requestType === "PROMOTE_TO_5" || requestType === "DEMOTE_FROM_5";
-  const isDemotion = requestType === "DEMOTE_FROM_5";
+  const isDemotion = requestType === "DEMOTE" || requestType === "DEMOTE_FROM_5";
 
   const handleVote = (vote: "for" | "against") => {
     setVoting(true);
@@ -81,16 +81,20 @@ export default function PromotionCard({
             <Badge className={cn("text-xs border-0", statusStyles[status])}>
               {status.charAt(0).toUpperCase() + status.slice(1)}
             </Badge>
-            {isLevel5Governance && (
+            {isDemotion && (
               <Badge 
-                variant={isDemotion ? "destructive" : "default"}
+                variant="destructive"
                 className="text-xs gap-1"
               >
-                {isDemotion ? (
-                  <><ArrowDown className="h-3 w-3" />Demotion</>
-                ) : (
-                  <><Shield className="h-3 w-3" />Level 5</>
-                )}
+                <ArrowDown className="h-3 w-3" />Demotion
+              </Badge>
+            )}
+            {isLevel5Governance && !isDemotion && (
+              <Badge 
+                variant="default"
+                className="text-xs gap-1"
+              >
+                <Shield className="h-3 w-3" />Level 5
               </Badge>
             )}
           </div>

@@ -38,9 +38,18 @@ export default function UsernameRegistration({ onComplete }: UsernameRegistratio
       const response = await apiRequest("POST", "/api/auth/complete-registration", { username });
       return response.json();
     },
-    onSuccess: () => {
+    onSuccess: async () => {
+      // Invalidate queries
       queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
       queryClient.invalidateQueries({ queryKey: ["/api/auth/pending-registration"] });
+      
+      // Wait a moment for session to persist, then retry
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Force refetch
+      await queryClient.refetchQueries({ queryKey: ["/api/auth/user"] });
+      await queryClient.refetchQueries({ queryKey: ["/api/auth/pending-registration"] });
+      
       toast({
         title: "Welcome!",
         description: "Your account has been created successfully.",

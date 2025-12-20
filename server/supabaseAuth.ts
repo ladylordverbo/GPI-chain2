@@ -17,6 +17,18 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+/**
+ * Determine the correct SameSite value for cookies
+ * For same-domain deployments, use 'lax'
+ * For cross-origin, use 'none' (requires secure: true)
+ */
+export function getCookieSameSite(): 'lax' | 'none' {
+  // If explicitly set to cross-origin, use 'none'
+  // Otherwise, use 'lax' for same-domain (which is the case for Vercel deployments)
+  // 'lax' allows cookies to be sent in same-site requests and top-level navigations
+  return 'lax';
+}
+
 export function getSession() {
   const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
   
@@ -36,6 +48,17 @@ export function getSession() {
     tableName: "sessions",
   });
   
+  // Detect if running behind ngrok or other HTTPS proxy
+  // ngrok URLs contain 'ngrok' in the hostname
+  // Also check for explicit environment variable
+  const isNgrok = process.env.NGROK === 'true' || 
+                  process.env.USE_SECURE_COOKIES === 'true' ||
+                  process.env.VERCEL_URL?.includes('ngrok') ||
+                  false; // Will be detected dynamically in middleware
+  
+  // Use secure cookies if in production OR behind ngrok (HTTPS proxy)
+  const useSecureCookies = process.env.NODE_ENV === 'production' || isNgrok;
+  
   return session({
     secret: process.env.SESSION_SECRET,
     store: sessionStore,
@@ -43,9 +66,11 @@ export function getSession() {
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      secure: useSecureCookies, // Enable for ngrok
+      sameSite: getCookieSameSite(), // Use 'lax' for same-domain
       maxAge: sessionTtl,
+      path: '/', // Explicitly set path to ensure cookies work across all routes
+      // Don't set domain - let browser handle it for ngrok compatibility
     },
   });
 }
@@ -59,7 +84,7 @@ interface PendingRegistration {
 
 export async function checkUserRegistration(email: string, inviteToken?: string): Promise<{ user: any, pending?: PendingRegistration, error?: string }> {
   const userCount = await storage.getUserCount();
-  const isFirstUser = userCount === 0;
+  const isFirstOrSecondUser = userCount <= 1;
 
   // Check if user already exists by email
   const existingUser = await storage.getUserByEmail(email);
@@ -69,13 +94,13 @@ export async function checkUserRegistration(email: string, inviteToken?: string)
   }
 
   // New user registration - require invite unless first user
-  if (!isFirstUser && !inviteToken) {
+  if (userCount >= 1 && !inviteToken) {
     return { user: null, error: "Invite token required for registration" };
   }
 
   // Validate invite link for new users (not first user)
   let invitedByUserId: string | undefined;
-  if (inviteToken && !isFirstUser) {
+  if (inviteToken && userCount >= 1) {
     const inviteLink = await storage.getInviteLinkByToken(inviteToken);
     if (!inviteLink) {
       return { user: null, error: "Invalid invite token" };
@@ -95,7 +120,10 @@ export async function checkUserRegistration(email: string, inviteToken?: string)
       email,
       inviteToken,
       invitedByUserId,
-      isFirstUser,
+      // If inviteToken exists, user is NOT first user (invites require existing users)
+      // Only first user (userCount === 0) doesn't need invite
+      // Second user needs invite but still gets level 5 (handled in completeRegistration)
+      isFirstUser: inviteToken ? false : (userCount === 0),
     }
   };
 }
@@ -138,22 +166,105 @@ export async function completeRegistration(pendingReg: PendingRegistration, user
   }
 
   // Create user in your database
+  // Check user count at registration time (before this user is created)
+  const userCount = await storage.getUserCount();
+  let assignedLevel: number;
+
+  if (pendingReg.inviteToken || pendingReg.invitedByUserId) {
+    // Users with invite tokens: check if this is the second user
+    if (userCount === 1) {
+      // Second user gets level 5 even with invite token
+      assignedLevel = 5;
+    } else {
+      // All other invited users get level 1
+      assignedLevel = 1;
+    }
+  } else if (userCount === 0) {
+    // First user gets level 5
+    assignedLevel = 5;
+  } else {
+    // This shouldn't happen (should have invite token), but default to level 1
+    assignedLevel = 1;
+  }
+
+  // Ensure invitedByUserId is set if we have an inviteToken but missing invitedByUserId
+  let finalInvitedByUserId = pendingReg.invitedByUserId;
+  if (pendingReg.inviteToken && !finalInvitedByUserId) {
+    console.log(`[REGISTRATION] Invite token present but invitedByUserId missing, fetching from invite link...`);
+    try {
+      const inviteLink = await storage.getInviteLinkByToken(pendingReg.inviteToken);
+      if (inviteLink) {
+        finalInvitedByUserId = inviteLink.invitedByUserId;
+        console.log(`[REGISTRATION] Retrieved invitedByUserId from invite link: ${finalInvitedByUserId}`);
+      }
+    } catch (e) {
+      console.error(`[REGISTRATION] Failed to fetch invite link for token ${pendingReg.inviteToken}:`, e);
+    }
+  }
+
+  console.log(`[REGISTRATION] Creating user with:`, {
+    email: pendingReg.email,
+    username: normalizedUsername,
+    level: assignedLevel,
+    invitedByUserId: finalInvitedByUserId,
+    inviteToken: pendingReg.inviteToken ? 'present' : 'missing',
+  });
+
   const user = await storage.upsertUser({
     id: userId,
     username: normalizedUsername,
     email: pendingReg.email,
-    level: pendingReg.isFirstUser ? 5 : 1,
-    invitedByUserId: pendingReg.invitedByUserId,
+    level: assignedLevel,
+    invitedByUserId: finalInvitedByUserId,
     agreementAcceptedAt: new Date(),
     agreementVersion: 1,
   });
 
+  console.log(`[REGISTRATION] User created:`, {
+    id: user.id,
+    username: user.username,
+    level: user.level,
+    invitedByUserId: user.invitedByUserId,
+  });
+
   // Mark invite link as used if applicable
-  if (pendingReg.inviteToken && pendingReg.invitedByUserId) {
+  if (pendingReg.inviteToken) {
     try {
-      await storage.useInviteLink(pendingReg.inviteToken, user.id);
+      const updatedLink = await storage.useInviteLink(pendingReg.inviteToken, user.id);
+      console.log(`[REGISTRATION] Successfully marked invite link as used:`, {
+        token: pendingReg.inviteToken,
+        usesCount: updatedLink.usesCount,
+        status: updatedLink.status,
+        usedByUserId: updatedLink.usedByUserId,
+        invitedByUserId: updatedLink.invitedByUserId,
+      });
+      
+      // Ensure user's invited_by_user_id is set if it's NULL
+      // This fixes cases where the field wasn't set during user creation
+      if (!user.invitedByUserId && updatedLink.invitedByUserId) {
+        console.log(`[REGISTRATION] Updating user's invited_by_user_id from invite link:`, {
+          userId: user.id,
+          invitedByUserId: updatedLink.invitedByUserId,
+        });
+        // Update the user's invited_by_user_id
+        const updatedUser = await storage.upsertUser({
+          id: user.id,
+          invitedByUserId: updatedLink.invitedByUserId,
+        });
+        // Update the returned user object
+        user.invitedByUserId = updatedUser.invitedByUserId;
+        console.log(`[REGISTRATION] User's invited_by_user_id updated successfully`);
+      }
     } catch (e) {
-      console.error("Failed to mark invite as used:", e);
+      // Log error with more context
+      console.error("[REGISTRATION] Failed to mark invite as used:", {
+        inviteToken: pendingReg.inviteToken,
+        userId: user.id,
+        error: e instanceof Error ? e.message : String(e),
+        stack: e instanceof Error ? e.stack : undefined,
+      });
+      // Note: We don't fail registration here to avoid blocking users, but this should be rare
+      // The useInviteLink function will throw if the link is already used or invalid
     }
   }
 
@@ -162,7 +273,42 @@ export async function completeRegistration(pendingReg: PendingRegistration, user
 
 export async function setupAuth(app: Express) {
   app.set("trust proxy", 1);
+  
+  // Detect ngrok from request headers and adjust cookie settings
+  // This must run before getSession() middleware
+  app.use((req, res, next) => {
+    const host = req.get('host') || '';
+    const forwardedHost = req.headers['x-forwarded-host']?.toString() || '';
+    const isNgrok = host.includes('ngrok') || forwardedHost.includes('ngrok');
+    
+    if (isNgrok) {
+      (req as any).isNgrok = true;
+      // Only log once per session to reduce noise
+      if (!req.session || !(req.session as any).ngrokLogged) {
+        console.log('[Auth] Detected ngrok proxy:', { host, forwardedHost });
+        if (req.session) {
+          (req.session as any).ngrokLogged = true;
+        }
+      }
+    }
+    
+    next();
+  });
+  
   app.use(getSession());
+  
+  // After session middleware, force secure cookies for ngrok if detected
+  app.use((req, res, next) => {
+    if ((req as any).isNgrok && req.session && req.session.cookie) {
+      // Only log if we're actually changing something
+      if (!req.session.cookie.secure) {
+        req.session.cookie.secure = true;
+        console.log('[Auth] Forced secure cookies for ngrok request');
+      }
+    }
+    next();
+  });
+  
   app.use(passport.initialize());
   app.use(passport.session());
 
@@ -203,9 +349,36 @@ export async function setupAuth(app: Express) {
       (req.session as any).inviteToken = inviteToken;
     }
     
+    // Get the correct redirect URL for production
+    // On Vercel, use the host header which includes the correct domain
+    let redirectUrl: string;
+    const host = req.get('host');
+    const protocol = req.protocol || 'https';
+    
+    if (process.env.VERCEL_URL) {
+      // Use VERCEL_URL if available (preview deployments)
+      redirectUrl = `https://${process.env.VERCEL_URL}/callback.html`;
+    } else if (host) {
+      // Use the host from request headers (production/main domain)
+      redirectUrl = `${protocol}://${host}/callback.html`;
+    } else {
+      // Fallback for development
+      redirectUrl = 'http://localhost:5000/callback.html';
+    }
+    
+    console.log('[LOGIN] OAuth redirect URL:', redirectUrl, {
+      host,
+      protocol,
+      vercelUrl: process.env.VERCEL_URL,
+      headers: {
+        host: req.headers.host,
+        'x-forwarded-host': req.headers['x-forwarded-host'],
+        'x-forwarded-proto': req.headers['x-forwarded-proto'],
+      }
+    });
+    
     // Redirect to Supabase OAuth (Google)
     // Use client-side callback page to handle URL fragments
-    const redirectUrl = `${req.protocol}://${req.get('host')}/callback.html`;
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
@@ -218,13 +391,16 @@ export async function setupAuth(app: Express) {
     });
 
     if (error) {
+      console.error('[LOGIN] OAuth error:', error);
       return res.redirect(`/?error=${encodeURIComponent(error.message)}`);
     }
 
     if (data?.url) {
+      console.log('[LOGIN] Redirecting to OAuth provider');
       return res.redirect(data.url);
     }
 
+    console.error('[LOGIN] OAuth initialization failed - no URL returned');
     return res.redirect('/?error=OAuth initialization failed');
   });
 
@@ -305,6 +481,8 @@ export async function setupAuth(app: Express) {
         (req.session as any).pendingRegistration = result.pending;
         (req.session as any).supabaseUserId = sessionData.user.id;
         (req.session as any).supabaseEmail = userEmail;
+        // Also store userId for consistency
+        (req.session as any).userId = sessionData.user.id;
         
         // Create a temporary session so the user can complete registration
         // This allows the frontend to check for pending registration
@@ -334,6 +512,17 @@ export async function setupAuth(app: Express) {
               }
               return;
             }
+            
+            // Verify what was saved
+            console.log('[CALLBACK-TOKEN] Session data after save:', {
+              sessionID: req.sessionID,
+              hasPendingReg: !!(req.session as any).pendingRegistration,
+              hasSupabaseUserId: !!(req.session as any).supabaseUserId,
+              supabaseUserId: (req.session as any).supabaseUserId,
+              hasUserId: !!(req.session as any).userId,
+              userId: (req.session as any).userId,
+            });
+            
             console.log('[CALLBACK-TOKEN] SUCCESS: Session saved, redirecting to /?register=pending');
             if (!res.headersSent) {
               return res.json({ redirect: '/?register=pending' });
@@ -360,7 +549,13 @@ export async function setupAuth(app: Express) {
       // Use the database user as-is - don't try to sync IDs
       // The database user ID is the source of truth
       console.log('[CALLBACK-TOKEN] Calling req.logIn for existing user...');
-      req.logIn({ ...dbUser, email: userEmail }, (err) => {
+      // Store userId in session as backup
+      (req.session as any).userId = dbUser.id;
+      if ((req.session as any).supabaseUserId !== dbUser.id) {
+        (req.session as any).supabaseUserId = dbUser.id;
+      }
+      
+      req.logIn({ ...dbUser, email: userEmail, id: dbUser.id }, (err) => {
         if (err) {
           console.error('[CALLBACK-TOKEN] ERROR: req.logIn failed:', err);
           if (!res.headersSent) {
@@ -368,7 +563,7 @@ export async function setupAuth(app: Express) {
           }
           return;
         }
-        console.log('[CALLBACK-TOKEN] req.logIn successful, saving session...');
+          console.log('[CALLBACK-TOKEN] req.logIn successful, saving session...');
         // Explicitly save session to ensure it persists
         req.session.save((saveErr) => {
           console.log('[CALLBACK-TOKEN] Session save attempt');
@@ -381,17 +576,30 @@ export async function setupAuth(app: Express) {
             }
             return;
           }
+          
+          // Verify what was saved
+          console.log('[CALLBACK-TOKEN] Session data after save (existing user):', {
+            sessionID: req.sessionID,
+            hasSupabaseUserId: !!(req.session as any).supabaseUserId,
+            supabaseUserId: (req.session as any).supabaseUserId,
+            hasUserId: !!(req.session as any).userId,
+            userId: (req.session as any).userId,
+          });
+          
           console.log('[CALLBACK-TOKEN] SUCCESS: Session saved, redirecting to /');
           if (!res.headersSent) {
             // Generate JWT token for serverless compatibility
             const jwtToken = generateToken(dbUser);
+            console.log('[CALLBACK-TOKEN] Generated JWT token, setting cookie...');
             // Store token in cookie for serverless
             res.cookie('jwt', jwtToken, {
               httpOnly: true,
-              secure: process.env.NODE_ENV === 'production',
-              sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+              secure: true, // Always secure on Vercel
+              sameSite: getCookieSameSite(), // Use 'lax' for same-domain
               maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+              path: '/', // Ensure cookie is available site-wide
             });
+            console.log('[CALLBACK-TOKEN] Cookie set, sending response with redirect');
             return res.json({ redirect: '/', token: jwtToken });
           }
         });
@@ -477,16 +685,23 @@ export async function setupAuth(app: Express) {
 
       // Use the database user as-is - don't try to sync IDs
       // The database user ID is the source of truth
-      req.logIn({ ...dbUser, email: userEmail }, (err) => {
+      // Store userId in session as backup
+      (req.session as any).userId = dbUser.id;
+      if ((req.session as any).supabaseUserId !== dbUser.id) {
+        (req.session as any).supabaseUserId = dbUser.id;
+      }
+      
+      req.logIn({ ...dbUser, email: userEmail, id: dbUser.id }, (err) => {
         if (err) return next(err);
         // Generate JWT token for serverless compatibility
         const jwtToken = generateToken(dbUser);
         // Store token in cookie for serverless
         res.cookie('jwt', jwtToken, {
           httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+          secure: true, // Always secure on Vercel
+          sameSite: getCookieSameSite(), // Use 'lax' for same-domain
           maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+          path: '/', // Ensure cookie is available site-wide
         });
         return res.redirect('/');
       });
@@ -519,23 +734,31 @@ export async function setupAuth(app: Express) {
 
       if (result.pending) {
         (req.session as any).pendingRegistration = result.pending;
-        req.logIn(user, (err) => {
+        // Store userId in session as backup even for pending users
+        if (user.id) {
+          (req.session as any).userId = user.id;
+        }
+        req.logIn({ ...user, id: user.id }, (err) => {
           if (err) return next(err);
           return res.json({ pending: true });
         });
         return;
       }
 
-      req.logIn(user, (err) => {
+      // Store userId in session as backup
+      (req.session as any).userId = user.id;
+      
+      req.logIn({ ...user, id: user.id }, (err) => {
         if (err) return next(err);
         // Generate JWT token for serverless compatibility
         const jwtToken = generateToken(user);
         // Store token in cookie for serverless
         res.cookie('jwt', jwtToken, {
           httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+          secure: true, // Always secure on Vercel
+          sameSite: getCookieSameSite(), // Use 'lax' for same-domain
           maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+          path: '/', // Ensure cookie is available site-wide
         });
         return res.json({ success: true, user, token: jwtToken });
       });
@@ -552,9 +775,10 @@ export async function setupAuth(app: Express) {
       // Clear JWT cookie
       res.cookie('jwt', '', {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+        secure: true, // Always secure on Vercel
+        sameSite: getCookieSameSite(), // Use 'lax' for same-domain
         maxAge: 0,
+        path: '/', // Ensure cookie is available site-wide
       });
       res.redirect('/');
     });
@@ -562,8 +786,24 @@ export async function setupAuth(app: Express) {
 }
 
 export const isAuthenticated: RequestHandler = async (req, res, next) => {
+  const path = (req as any).path || (req as any).url || 'unknown';
+  
+  // Log session state for debugging
+  console.log('[Auth] Checking authentication for', path, {
+    hasSession: !!req.session,
+    sessionID: req.sessionID,
+    hasPassportUser: !!(req.session as any)?.passport?.user,
+    isAuthenticated: req.isAuthenticated(),
+    hasUser: !!(req as any).user,
+    hasCookies: !!(req as any).cookies,
+    cookieHeader: req.headers.cookie ? 'present' : 'missing',
+    isNgrok: !!(req as any).isNgrok,
+    host: req.get('host'),
+  });
+  
   // Try Express session first
   if (req.isAuthenticated()) {
+    console.log('[Auth] Authenticated via Express session for', path);
     return next();
   }
   
@@ -572,18 +812,34 @@ export const isAuthenticated: RequestHandler = async (req, res, next) => {
     const { authenticateJWT } = await import('./jwtAuth');
     const user = await authenticateJWT(req);
     if (user) {
+      console.log('[Auth] Authenticated via JWT for', path, 'user:', user.id);
       (req as any).user = user;
       return next();
+    } else {
+      console.log('[Auth] JWT authentication failed for', path);
     }
   } catch (error) {
+    console.error('[Auth] JWT authentication error for', path, ':', error);
     // JWT auth failed, continue to error
   }
+  
+  console.log('[Auth] Unauthorized access attempt for', path, {
+    hasSession: !!req.session,
+    sessionID: req.sessionID,
+    hasPassportUser: !!(req.session as any)?.passport?.user,
+    hasUser: !!(req as any).user,
+    hasCookies: !!(req as any).cookies,
+    cookieKeys: (req as any).cookies ? Object.keys((req as any).cookies) : [],
+    cookieHeader: req.headers.cookie ? 'present' : 'missing',
+    isNgrok: !!(req as any).isNgrok,
+  });
   
   return res.status(401).json({ message: "Unauthorized" });
 };
 
 export const requireLevel = (minLevel: number): RequestHandler => {
   return async (req, res, next) => {
+    const path = (req as any).path || (req as any).url || 'unknown';
     let user = req.user as any;
     
     // If no user from Express session, try JWT
@@ -592,15 +848,20 @@ export const requireLevel = (minLevel: number): RequestHandler => {
         const { authenticateJWT } = await import('./jwtAuth');
         const jwtUser = await authenticateJWT(req);
         if (jwtUser) {
+          console.log('[Auth] Level check: Authenticated via JWT for', path);
           user = jwtUser;
           (req as any).user = jwtUser;
+        } else {
+          console.log('[Auth] Level check: JWT authentication failed for', path);
         }
       } catch (error) {
+        console.error('[Auth] Level check: JWT authentication error for', path, ':', error);
         // JWT auth failed
       }
     }
     
     if (!user?.id) {
+      console.log('[Auth] Level check: Unauthorized - no user for', path);
       return res.status(401).json({ message: "Unauthorized" });
     }
 

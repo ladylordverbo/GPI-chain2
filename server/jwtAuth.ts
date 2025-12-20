@@ -46,39 +46,101 @@ export function verifyToken(token: string): JWTPayload | null {
 /**
  * Extract JWT token from request headers
  * Supports both Authorization header and cookie
+ * Enhanced for serverless environments
  */
 export function extractToken(req: { headers: Record<string, string | string[] | undefined>; cookies?: Record<string, string> }): string | null {
   // Try Authorization header first (Bearer token)
   const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    return authHeader.substring(7);
-  }
-
-  // Try cookie
-  if (req.cookies?.jwt) {
-    return req.cookies.jwt;
-  }
-
-  // Try cookie from headers (for serverless)
-  const cookieHeader = req.headers.cookie;
-  if (cookieHeader && typeof cookieHeader === "string") {
-    const cookies = cookieHeader.split(";").reduce((acc, cookie) => {
-      const [key, value] = cookie.trim().split("=");
-      acc[key] = value;
-      return acc;
-    }, {} as Record<string, string>);
-    
-    if (cookies.jwt) {
-      return cookies.jwt;
+  if (authHeader) {
+    const authValue = typeof authHeader === "string" ? authHeader : authHeader[0];
+    if (authValue && authValue.startsWith("Bearer ")) {
+      const token = authValue.substring(7).trim();
+      if (token) {
+        console.log('[JWT Extract] Found token in Authorization header');
+        return token;
+      }
     }
   }
 
+  // Try cookie object first (most reliable in serverless)
+  if (req.cookies && typeof req.cookies === 'object') {
+    const jwtCookie = req.cookies.jwt;
+    if (jwtCookie && typeof jwtCookie === 'string' && jwtCookie.trim()) {
+      console.log('[JWT Extract] Found token in req.cookies.jwt');
+      return jwtCookie.trim();
+    }
+  }
+
+  // Try cookie from headers (fallback for serverless environments)
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    const cookieString = typeof cookieHeader === "string" 
+      ? cookieHeader 
+      : Array.isArray(cookieHeader) 
+        ? cookieHeader[0] 
+        : String(cookieHeader);
+    
+    if (cookieString) {
+      try {
+        const cookies = cookieString.split(";").reduce((acc, cookie) => {
+          const trimmed = cookie.trim();
+          if (!trimmed) return acc;
+          
+          const equalIndex = trimmed.indexOf('=');
+          if (equalIndex === -1) {
+            // Cookie without value
+            return acc;
+          }
+          
+          const key = trimmed.substring(0, equalIndex).trim();
+          const value = trimmed.substring(equalIndex + 1).trim();
+          
+          if (key) {
+            try {
+              acc[key] = decodeURIComponent(value);
+            } catch (e) {
+              // If decode fails, use raw value
+              acc[key] = value;
+            }
+          }
+          return acc;
+        }, {} as Record<string, string>);
+        
+        if (cookies.jwt && cookies.jwt.trim()) {
+          console.log('[JWT Extract] Found token in Cookie header');
+          return cookies.jwt.trim();
+        }
+      } catch (e) {
+        console.warn('[JWT Extract] Error parsing cookie header:', e);
+      }
+    }
+  }
+
+  // Enhanced logging for debugging
+  const debugInfo = {
+    hasCookies: !!req.cookies,
+    cookieType: req.cookies ? typeof req.cookies : 'none',
+    cookieKeys: req.cookies && typeof req.cookies === 'object' ? Object.keys(req.cookies) : [],
+    hasCookieHeader: !!cookieHeader,
+    cookieHeaderType: cookieHeader ? typeof cookieHeader : 'none',
+    cookieHeaderLength: cookieHeader 
+      ? (typeof cookieHeader === 'string' 
+          ? cookieHeader.length 
+          : Array.isArray(cookieHeader) 
+            ? cookieHeader[0]?.length || 0 
+            : String(cookieHeader).length)
+      : 0,
+    hasAuthHeader: !!authHeader,
+  };
+  
+  console.log('[JWT Extract] No token found', debugInfo);
   return null;
 }
 
 /**
  * Middleware to authenticate user from JWT token
  * Returns the user if authenticated, null otherwise
+ * Enhanced with better error handling and logging
  */
 export async function authenticateJWT(
   req: { headers: Record<string, string | string[] | undefined>; cookies?: Record<string, string> }
@@ -90,19 +152,28 @@ export async function authenticateJWT(
 
   const payload = verifyToken(token);
   if (!payload) {
+    console.log('[JWT Auth] Token verification failed - invalid or expired token');
     return null;
   }
 
   // Fetch fresh user data from database
-  const user = await storage.getUser(payload.userId);
+  let user: User | null;
+  try {
+    user = await storage.getUser(payload.userId);
+  } catch (error) {
+    console.error('[JWT Auth] Error fetching user from database:', error);
+    return null;
+  }
+  
   if (!user) {
+    console.log('[JWT Auth] User not found in database:', payload.userId);
     return null;
   }
 
   // Verify level hasn't changed (optional security check)
   if (user.level !== payload.level) {
     // Token is valid but user level changed - still allow but log
-    console.warn(`User ${user.id} level changed from ${payload.level} to ${user.level}`);
+    console.warn(`[JWT Auth] User ${user.id} level changed from ${payload.level} to ${user.level}`);
   }
 
   return user;

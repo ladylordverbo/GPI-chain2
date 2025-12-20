@@ -13,7 +13,7 @@ import LevelBadge from "./LevelBadge";
 import StatusDot from "./StatusDot";
 import GPIChainNode from "./GPIChainNode";
 import ThemeToggle from "./ThemeToggle";
-import { Calendar, Users, ArrowUpCircle, Shield, LogOut, Settings, Pencil, Check, X, Loader2 } from "lucide-react";
+import { Calendar, Users, ArrowUpCircle, ArrowDownCircle, Shield, LogOut, Settings, Pencil, Check, X, Loader2 } from "lucide-react";
 import { format } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -44,11 +44,14 @@ function buildGPITree(user: UserWithInvitees): any {
 export default function ProfileView() {
   const [isPromoteDialogOpen, setIsPromoteDialogOpen] = useState(false);
   const [isEditUsernameOpen, setIsEditUsernameOpen] = useState(false);
+  const [isSelfDemoteDialogOpen, setIsSelfDemoteDialogOpen] = useState(false);
   const [newUsername, setNewUsername] = useState("");
   const [debouncedUsername, setDebouncedUsername] = useState("");
   const [selectedMember, setSelectedMember] = useState<string>("");
   const [selectedLevel, setSelectedLevel] = useState<string>("");
+  const [selectedDemoteLevel, setSelectedDemoteLevel] = useState<string>("");
   const [justification, setJustification] = useState("");
+  const [demoteReason, setDemoteReason] = useState("");
   const { toast } = useToast();
   const { user: authUser, isLoading: authLoading } = useAuth();
 
@@ -121,6 +124,51 @@ export default function ProfileView() {
     },
   });
 
+  const selfDemoteMutation = useMutation({
+    mutationFn: async (data: { newLevel: number; reason: string }) => {
+      const response = await apiRequest("POST", "/api/users/self/demote", data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ 
+        title: "Level Demoted", 
+        description: "Your level has been successfully demoted."
+      });
+      setIsSelfDemoteDialogOpen(false);
+      setSelectedDemoteLevel("");
+      setDemoteReason("");
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
+    },
+    onError: (error: any) => {
+      let errorMessage = "An error occurred";
+      
+      // Try to extract error message from response
+      if (error.message) {
+        // Error format from apiRequest is "400: {...}" or "400: message"
+        const match = error.message.match(/^\d+:\s*(.+)$/);
+        if (match) {
+          try {
+            const errorData = JSON.parse(match[1]);
+            errorMessage = errorData.message || errorMessage;
+          } catch {
+            // If not JSON, use the message as-is
+            errorMessage = match[1];
+          }
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      toast({
+        title: "Failed to Demote",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    },
+  });
+
   const handleLogout = async () => {
     try {
       // Clear auth state immediately
@@ -142,6 +190,14 @@ export default function ProfileView() {
       currentLevel: candidate.level,
       proposedLevel: parseInt(selectedLevel),
       justification,
+    });
+  };
+
+  const handleSelfDemoteSubmit = () => {
+    if (!selectedDemoteLevel || !demoteReason) return;
+    selfDemoteMutation.mutate({
+      newLevel: parseInt(selectedDemoteLevel),
+      reason: demoteReason,
     });
   };
 
@@ -323,6 +379,91 @@ export default function ProfileView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Self-Demotion Section - Available to all members except Level 1 */}
+      {user.level > 1 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ArrowDownCircle className="h-4 w-4" />
+              Self-Demotion
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground mb-4">
+              You can voluntarily demote yourself to a lower level. This action cannot be undone without going through the promotion process.
+            </p>
+            <Dialog open={isSelfDemoteDialogOpen} onOpenChange={setIsSelfDemoteDialogOpen}>
+              <DialogTrigger asChild>
+                <Button 
+                  variant="outline" 
+                  className="w-full"
+                  data-testid="button-self-demote"
+                >
+                  <ArrowDownCircle className="h-4 w-4 mr-2" />
+                  Demote Myself
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Demote Yourself</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <div className="space-y-2">
+                    <Label>Select New Level</Label>
+                    <Select value={selectedDemoteLevel} onValueChange={setSelectedDemoteLevel}>
+                      <SelectTrigger data-testid="select-demote-level">
+                        <SelectValue placeholder="Select level" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Array.from({ length: user.level - 1 }, (_, i) => i + 1).map(level => (
+                          <SelectItem key={level} value={level.toString()}>
+                            Level {level}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Currently Level {user.level} → Level {selectedDemoteLevel || "?"}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Reason</Label>
+                    <Textarea
+                      placeholder="Explain why you want to demote yourself..."
+                      value={demoteReason}
+                      onChange={(e) => setDemoteReason(e.target.value)}
+                      rows={3}
+                      data-testid="input-demote-reason"
+                    />
+                    <p className="text-xs text-muted-foreground">{demoteReason.length}/500 characters</p>
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setIsSelfDemoteDialogOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button 
+                    onClick={handleSelfDemoteSubmit}
+                    disabled={!selectedDemoteLevel || demoteReason.length < 10 || selfDemoteMutation.isPending}
+                    variant="destructive"
+                    data-testid="button-submit-self-demote"
+                  >
+                    {selfDemoteMutation.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Demoting...
+                      </>
+                    ) : (
+                      "Confirm Demotion"
+                    )}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </CardContent>
+        </Card>
+      )}
 
       {user.level >= 4 && (
         <Card>

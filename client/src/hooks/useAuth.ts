@@ -6,17 +6,29 @@ interface AuthUser extends User {
   inviteCount: number;
 }
 
+interface AuthResponse extends AuthUser {
+  pending?: boolean;
+  message?: string;
+  userId?: string;
+}
+
 export function useAuth() {
-  const { data: user, isLoading, error } = useQuery<AuthUser>({
+  const { data: userData, isLoading, error } = useQuery<AuthResponse>({
     queryKey: ["/api/auth/user"],
     retry: false,
   });
 
+  // If response has pending flag, user is authenticated but registration is pending
+  // Don't treat this as a user object, but do treat as authenticated
+  const isPendingRegistration = userData?.pending === true;
+  const user = isPendingRegistration ? undefined : (userData as AuthUser | undefined);
+
   return {
     user,
     isLoading,
-    isAuthenticated: !!user,
+    isAuthenticated: !!user || isPendingRegistration, // Authenticated if user exists OR registration is pending
     error,
+    isPendingRegistration,
   };
 }
 

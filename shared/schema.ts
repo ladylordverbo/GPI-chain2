@@ -186,6 +186,12 @@ export const insertVoteSchema = createInsertSchema(votes).omit({
   createdAt: true,
 });
 
+// Self-demotion request schema
+export const selfDemotionRequestSchema = z.object({
+  newLevel: z.number().int().min(1).max(4), // Levels 1-4 (can't demote to 5 or above)
+  reason: z.string().min(10).max(500), // Reason must be 10-500 characters
+});
+
 export type UpsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -198,5 +204,7 @@ export type InsertPromotionRequest = z.infer<typeof insertPromotionRequestSchema
 
 export type Vote = typeof votes.$inferSelect;
 export type InsertVote = z.infer<typeof insertVoteSchema>;
+
+export type SelfDemotionRequest = z.infer<typeof selfDemotionRequestSchema>;
 
 export type UserLevelHistory = typeof userLevelHistory.$inferSelect;

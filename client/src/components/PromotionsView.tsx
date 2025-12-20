@@ -65,7 +65,7 @@ export default function PromotionsView() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Promotions</h1>
+      <h1 className="text-2xl font-bold">Promotions & Demotions</h1>
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="grid w-full grid-cols-2">
@@ -101,7 +101,7 @@ export default function PromotionsView() {
                 votesAgainst={promotion.votesAgainst}
                 requiredVotes={promotion.requiredVotes}
                 status={promotion.status as "open" | "approved" | "rejected" | "expired"}
-                requestType={promotion.requestType as "PROMOTE" | "PROMOTE_TO_5" | "DEMOTE_FROM_5" | undefined}
+                requestType={promotion.requestType as "PROMOTE" | "DEMOTE" | "PROMOTE_TO_5" | "DEMOTE_FROM_5" | undefined}
                 allowedVoterMinLevel={promotion.allowedVoterMinLevel}
                 hasVoted={hasUserVoted(promotion)}
                 canVote={canUserVote(promotion)}
@@ -134,7 +134,7 @@ export default function PromotionsView() {
                 votesAgainst={promotion.votesAgainst}
                 requiredVotes={promotion.requiredVotes}
                 status={promotion.status as "open" | "approved" | "rejected" | "expired"}
-                requestType={promotion.requestType as "PROMOTE" | "PROMOTE_TO_5" | "DEMOTE_FROM_5" | undefined}
+                requestType={promotion.requestType as "PROMOTE" | "DEMOTE" | "PROMOTE_TO_5" | "DEMOTE_FROM_5" | undefined}
                 allowedVoterMinLevel={promotion.allowedVoterMinLevel}
                 hasVoted={hasUserVoted(promotion)}
                 canVote={false}

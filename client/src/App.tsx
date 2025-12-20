@@ -29,7 +29,7 @@ function LoadingScreen() {
 
 function MainApp() {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
-  const { user, isLoading: authLoading, isAuthenticated } = useAuth();
+  const { user, isLoading: authLoading, isAuthenticated, isPendingRegistration } = useAuth();
   const { setupRequired, isLoading: setupLoading } = useSetupRequired();
 
   // Check for invite token, error, and registration pending in URL
@@ -103,7 +103,8 @@ function MainApp() {
   }
 
   // Pending registration - need to choose username
-  if (pendingRegData?.pending) {
+  // Check both pendingRegData and useAuth's isPendingRegistration flag
+  if (pendingRegData?.pending || isPendingRegistration) {
     return <UsernameRegistration onComplete={handleRegistrationComplete} />;
   }
 

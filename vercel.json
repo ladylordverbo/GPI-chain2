@@ -10,6 +10,7 @@
   ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/callback.html", "destination": "/callback.html" },
     { "source": "/(.*)", "destination": "/index.html" }
   ],
   "headers": [
