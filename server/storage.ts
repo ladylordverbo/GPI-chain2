@@ -143,13 +143,13 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(users.createdAt));
     
     // Get invite links created by this user
-    const inviteLinks = await db
+    const userInviteLinks = await db
       .select()
       .from(inviteLinks)
       .where(eq(inviteLinks.invitedByUserId, userId));
     
     // Get user IDs who used invite links created by this user
-    const usedLinkUserIds = inviteLinks
+    const usedLinkUserIds = userInviteLinks
       .filter(link => link.usedByUserId)
       .map(link => link.usedByUserId!);
     
@@ -181,7 +181,7 @@ export class DatabaseStorage implements IStorage {
     // Log invite count calculation for debugging
     console.log(`[INVITE-COUNT] getInvitees for userId ${userId}:`, {
       directInviteesCount: directInvitees.length,
-      inviteLinksCount: inviteLinks.length,
+      inviteLinksCount: userInviteLinks.length,
       usedLinkUserIdsCount: usedLinkUserIds.length,
       linkInviteesCount: linkInvitees.length,
       totalInviteesCount: allInvitees.length,

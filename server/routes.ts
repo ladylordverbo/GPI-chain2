@@ -266,18 +266,21 @@ export async function registerRoutes(
     if ((req.user as any)?.pendingRegistration && !req.session.pendingRegistration) {
       const userCount = await storage.getUserCount();
       const pendingFromUser = (req.user as any)?.pendingRegistration;
-      // Only first user (userCount === 0) doesn't need invite
-      // Second user and beyond need invites, but second user still gets level 5
-      const isFirstUser = pendingFromUser?.inviteToken ? false : (userCount === 0);
+      // Preserve inviteToken from user object or try to get it from session
+      // The user object's pendingRegistration should have the inviteToken from when we logged in
+      const inviteToken = pendingFromUser?.inviteToken || 
+                          (req.session as any).inviteToken || 
+                          undefined;
+      const isFirstUser = inviteToken ? false : (userCount === 0);
       req.session.pendingRegistration = {
         email: (req.user as any)?.email,
-        inviteToken: pendingFromUser?.inviteToken,
+        inviteToken: inviteToken, // Ensure it's preserved
         invitedByUserId: pendingFromUser?.invitedByUserId,
         isFirstUser: isFirstUser,
       };
       console.log(`[SESSION-SYNC] Synced pending registration to session:`, {
         email: req.session.pendingRegistration.email,
-        inviteToken: req.session.pendingRegistration.inviteToken ? 'present' : 'missing',
+        inviteToken: req.session.pendingRegistration.inviteToken || 'missing',
         invitedByUserId: req.session.pendingRegistration.invitedByUserId || 'missing',
         isFirstUser: req.session.pendingRegistration.isFirstUser,
       });
@@ -300,6 +303,15 @@ export async function registerRoutes(
       if (!pending) {
         return res.status(400).json({ message: "No pending registration" });
       }
+
+      // Log to verify inviteToken is present
+      console.log(`[COMPLETE-REG] Pending registration from session:`, {
+        email: pending.email,
+        hasInviteToken: !!pending.inviteToken,
+        inviteToken: pending.inviteToken || 'missing',
+        invitedByUserId: pending.invitedByUserId || 'missing',
+        isFirstUser: pending.isFirstUser,
+      });
 
       const { username } = req.body;
       if (!username || typeof username !== "string") {

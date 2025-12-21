@@ -187,6 +187,16 @@ export async function completeRegistration(pendingReg: PendingRegistration, user
     assignedLevel = 1;
   }
 
+  // Log inviteToken status at start of completeRegistration
+  console.log(`[REGISTRATION] Starting completeRegistration:`, {
+    email: pendingReg.email,
+    username: normalizedUsername,
+    hasInviteToken: !!pendingReg.inviteToken,
+    inviteToken: pendingReg.inviteToken || 'missing',
+    hasInvitedByUserId: !!pendingReg.invitedByUserId,
+    invitedByUserId: pendingReg.invitedByUserId || 'missing',
+  });
+
   // Ensure invitedByUserId is set if we have an inviteToken but missing invitedByUserId
   let finalInvitedByUserId = pendingReg.invitedByUserId;
   if (pendingReg.inviteToken && !finalInvitedByUserId) {
@@ -196,6 +206,8 @@ export async function completeRegistration(pendingReg: PendingRegistration, user
       if (inviteLink) {
         finalInvitedByUserId = inviteLink.invitedByUserId;
         console.log(`[REGISTRATION] Retrieved invitedByUserId from invite link: ${finalInvitedByUserId}`);
+      } else {
+        console.error(`[REGISTRATION] Invite link not found for token: ${pendingReg.inviteToken}`);
       }
     } catch (e) {
       console.error(`[REGISTRATION] Failed to fetch invite link for token ${pendingReg.inviteToken}:`, e);
@@ -478,11 +490,32 @@ export async function setupAuth(app: Express) {
       if (result.pending) {
         // New user needs to choose username
         console.log('[CALLBACK-TOKEN] New user - setting up pending registration');
-        (req.session as any).pendingRegistration = result.pending;
+        // Ensure inviteToken is preserved from result.pending
+        // result.pending should already have inviteToken from checkUserRegistration
+        (req.session as any).pendingRegistration = {
+          ...result.pending,
+          inviteToken: result.pending.inviteToken || inviteToken, // Preserve from checkUserRegistration or fallback
+        };
         (req.session as any).supabaseUserId = sessionData.user.id;
         (req.session as any).supabaseEmail = userEmail;
         // Also store userId for consistency
         (req.session as any).userId = sessionData.user.id;
+        
+        // Log what we're storing
+        console.log('[CALLBACK-TOKEN] Stored pending registration:', {
+          email: (req.session as any).pendingRegistration.email,
+          hasInviteToken: !!(req.session as any).pendingRegistration.inviteToken,
+          inviteToken: (req.session as any).pendingRegistration.inviteToken || 'none',
+          invitedByUserId: (req.session as any).pendingRegistration.invitedByUserId || 'none',
+        });
+        
+        // Log session data before logIn
+        console.log('[CALLBACK-TOKEN] Session data before logIn:', {
+          hasPendingReg: !!(req.session as any).pendingRegistration,
+          pendingRegInviteToken: (req.session as any).pendingRegistration?.inviteToken || 'none',
+          supabaseUserId: (req.session as any).supabaseUserId,
+          userId: (req.session as any).userId,
+        });
         
         // Create a temporary session so the user can complete registration
         // This allows the frontend to check for pending registration
@@ -490,7 +523,10 @@ export async function setupAuth(app: Express) {
         req.logIn({ 
           id: sessionData.user.id, 
           email: userEmail,
-          pendingRegistration: true 
+          pendingRegistration: {
+            ...result.pending,
+            inviteToken: result.pending.inviteToken || inviteToken,
+          }
         }, (err) => {
           if (err) {
             console.error('[CALLBACK-TOKEN] ERROR: req.logIn failed:', err);
@@ -499,6 +535,14 @@ export async function setupAuth(app: Express) {
             }
             return;
           }
+          // After logIn, verify session data is still there
+          console.log('[CALLBACK-TOKEN] Session data after logIn (before save):', {
+            hasPendingReg: !!(req.session as any).pendingRegistration,
+            pendingRegInviteToken: (req.session as any).pendingRegistration?.inviteToken || 'none',
+            supabaseUserId: (req.session as any).supabaseUserId,
+            userId: (req.session as any).userId,
+          });
+          
           console.log('[CALLBACK-TOKEN] req.logIn successful, saving session...');
           // Explicitly save session to ensure it persists
           req.session.save((saveErr) => {
@@ -513,10 +557,11 @@ export async function setupAuth(app: Express) {
               return;
             }
             
-            // Verify what was saved
+            // After save, verify data persisted
             console.log('[CALLBACK-TOKEN] Session data after save:', {
               sessionID: req.sessionID,
               hasPendingReg: !!(req.session as any).pendingRegistration,
+              pendingRegInviteToken: (req.session as any).pendingRegistration?.inviteToken || 'none',
               hasSupabaseUserId: !!(req.session as any).supabaseUserId,
               supabaseUserId: (req.session as any).supabaseUserId,
               hasUserId: !!(req.session as any).userId,
