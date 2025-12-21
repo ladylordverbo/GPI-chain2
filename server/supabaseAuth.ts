@@ -778,14 +778,34 @@ export async function setupAuth(app: Express) {
       }
 
       if (result.pending) {
-        (req.session as any).pendingRegistration = result.pending;
+        // Ensure inviteToken is preserved in pending registration
+        (req.session as any).pendingRegistration = {
+          ...result.pending,
+          inviteToken: result.pending.inviteToken || inviteToken,
+        };
         // Store userId in session as backup even for pending users
         if (user.id) {
           (req.session as any).userId = user.id;
         }
-        req.logIn({ ...user, id: user.id }, (err) => {
+        // Also store supabaseUserId for consistency with OAuth flow
+        (req.session as any).supabaseUserId = user.id;
+        (req.session as any).supabaseEmail = user.email;
+        
+        req.logIn({ 
+          ...user, 
+          id: user.id,
+          pendingRegistration: {
+            ...result.pending,
+            inviteToken: result.pending.inviteToken || inviteToken,
+          }
+        }, (err) => {
           if (err) return next(err);
-          return res.json({ pending: true });
+          req.session.save((saveErr) => {
+            if (saveErr) {
+              console.error('[LOGIN] Error saving session:', saveErr);
+            }
+            return res.json({ pending: true });
+          });
         });
         return;
       }
@@ -808,6 +828,125 @@ export async function setupAuth(app: Express) {
         return res.json({ success: true, user, token: jwtToken });
       });
     })(req, res, next);
+  });
+
+  // Email/password signup route (POST)
+  app.post("/api/auth/signup", async (req, res) => {
+    console.log('[SIGNUP] Route hit - /api/auth/signup');
+    console.log('[SIGNUP] Request body:', { email: req.body?.email, hasPassword: !!req.body?.password, hasInviteToken: !!req.body?.inviteToken });
+    try {
+      const { email, password, inviteToken } = req.body;
+
+      // Validate required fields
+      if (!email || !password) {
+        return res.status(400).json({ message: "Email and password are required" });
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ message: "Invalid email format" });
+      }
+
+      // Validate password strength
+      if (password.length < 8) {
+        return res.status(400).json({ message: "Password must be at least 8 characters" });
+      }
+
+      // Check if user already exists in database
+      const existingUser = await storage.getUserByEmail(email);
+      if (existingUser) {
+        return res.status(400).json({ message: "An account with this email already exists" });
+      }
+
+      // Store invite token in session if provided
+      if (inviteToken) {
+        (req.session as any).inviteToken = inviteToken;
+      }
+
+      // Check user registration status (validates invite token if provided)
+      const registrationCheck = await checkUserRegistration(email, inviteToken);
+      
+      if (registrationCheck.error) {
+        return res.status(400).json({ message: registrationCheck.error });
+      }
+
+      // If user already exists (shouldn't happen due to check above, but double-check)
+      if (registrationCheck.user) {
+        return res.status(400).json({ message: "An account with this email already exists" });
+      }
+
+      // Create Supabase auth user
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email,
+        password,
+      });
+
+      if (authError || !authData.user) {
+        console.error('[SIGNUP] Supabase signup error:', authError);
+        return res.status(400).json({ 
+          message: authError?.message || "Failed to create account. Please try again." 
+        });
+      }
+
+      // Set up pending registration session (same as OAuth flow)
+      if (registrationCheck.pending) {
+        (req.session as any).pendingRegistration = {
+          ...registrationCheck.pending,
+          inviteToken: registrationCheck.pending.inviteToken || inviteToken,
+        };
+        (req.session as any).supabaseUserId = authData.user.id;
+        (req.session as any).supabaseEmail = email;
+        (req.session as any).userId = authData.user.id;
+
+        // Create temporary session for pending user
+        req.logIn({ 
+          id: authData.user.id, 
+          email: email,
+          pendingRegistration: {
+            ...registrationCheck.pending,
+            inviteToken: registrationCheck.pending.inviteToken || inviteToken,
+          }
+        }, (err) => {
+          if (err) {
+            console.error('[SIGNUP] Error creating session:', err);
+            if (!res.headersSent) {
+              return res.status(500).json({ message: "Account created but session failed. Please try logging in." });
+            }
+            return;
+          }
+          
+          req.session.save((saveErr) => {
+            if (saveErr) {
+              console.error('[SIGNUP] Error saving session:', saveErr);
+              if (!res.headersSent) {
+                return res.status(500).json({ message: "Account created but session save failed. Please try logging in." });
+              }
+              return;
+            }
+            
+            console.log('[SIGNUP] Session saved successfully, sending response');
+            if (!res.headersSent) {
+              res.setHeader('Content-Type', 'application/json');
+              return res.json({ 
+                success: true, 
+                pending: true,
+                message: "Account created. Please choose a username to continue." 
+              });
+            } else {
+              console.error('[SIGNUP] WARNING: Response headers already sent, cannot send JSON response');
+            }
+          });
+        });
+        return;
+      }
+
+      // This shouldn't happen, but handle it
+      return res.status(500).json({ message: "Unexpected error during registration" });
+    } catch (error: any) {
+      console.error('[SIGNUP] Unexpected error:', error);
+      return res.status(500).json({ message: error.message || "An unexpected error occurred" });
+    }
   });
 
   // Note: Registration completion is handled in routes.ts
