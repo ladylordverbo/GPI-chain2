@@ -273,7 +273,7 @@ export class DatabaseStorage implements IStorage {
       .values({
         token,
         invitedByUserId: userId,
-        maxUses: 1,
+        maxUses: 5,
       })
       .returning();
     return link;

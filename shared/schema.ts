@@ -52,7 +52,7 @@ export const inviteLinks = pgTable("invite_links", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   token: varchar("token").notNull().unique(),
   invitedByUserId: varchar("invited_by_user_id").notNull().references(() => users.id),
-  maxUses: integer("max_uses").default(1),
+  maxUses: integer("max_uses").default(5),
   usesCount: integer("uses_count").notNull().default(0),
   status: inviteLinkStatusEnum("status").notNull().default("active"),
   usedByUserId: varchar("used_by_user_id").references(() => users.id),
