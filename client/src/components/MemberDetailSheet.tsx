@@ -43,8 +43,11 @@ export default function MemberDetailSheet({ memberId, onClose }: MemberDetailShe
   const [isPromoteDialogOpen, setIsPromoteDialogOpen] = useState(false);
   const [isLevel5DialogOpen, setIsLevel5DialogOpen] = useState(false);
   const [isDemoteDialogOpen, setIsDemoteDialogOpen] = useState(false);
+  const [isSetLevelDialogOpen, setIsSetLevelDialogOpen] = useState(false);
   const [selectedLevel, setSelectedLevel] = useState<string>("");
+  const [selectedDirectLevel, setSelectedDirectLevel] = useState<string>("");
   const [justification, setJustification] = useState("");
+  const [directLevelReason, setDirectLevelReason] = useState("");
   const { toast } = useToast();
   const { user: currentUser } = useAuth();
 
@@ -110,6 +113,48 @@ export default function MemberDetailSheet({ memberId, onClose }: MemberDetailShe
       toast({
         title: "Failed to Bootstrap Promote",
         description: error.message || "An error occurred",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const setLevelDirectlyMutation = useMutation({
+    mutationFn: async ({ userId, newLevel, reason }: { userId: string; newLevel: number; reason: string }) => {
+      const response = await apiRequest("POST", `/api/users/${userId}/level`, { newLevel, reason });
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ 
+        title: "Level Set Successfully", 
+        description: "The member's level has been updated directly."
+      });
+      setIsSetLevelDialogOpen(false);
+      setSelectedDirectLevel("");
+      setDirectLevelReason("");
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
+      onClose();
+    },
+    onError: (error: any) => {
+      let errorMessage = "An error occurred";
+      
+      if (error.message) {
+        const match = error.message.match(/^\d+:\s*(.+)$/);
+        if (match) {
+          try {
+            const errorData = JSON.parse(match[1]);
+            errorMessage = errorData.message || errorMessage;
+          } catch {
+            errorMessage = match[1];
+          }
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      toast({
+        title: "Failed to Set Level",
+        description: errorMessage,
         variant: "destructive",
       });
     },
@@ -184,8 +229,19 @@ export default function MemberDetailSheet({ memberId, onClose }: MemberDetailShe
     governanceInfo && 
     governanceInfo.level5Count > 1; // Cannot demote last Level 5
 
+  // Direct level setting (Level 5 only, for users < Level 5)
+  const canSetLevelDirectly = currentUser && 
+    member && 
+    currentUser.id !== member.id && 
+    currentUser.level === 5 && 
+    member.level < 5;
+
   const availableLevels = member && currentUser 
     ? [2, 3, 4].filter(l => l > member.level && l <= Math.min(currentUser.level, 4))
+    : [];
+
+  const availableDirectLevels = member 
+    ? [1, 2, 3, 4].filter(l => l !== member.level)
     : [];
 
   return (
@@ -312,6 +368,18 @@ export default function MemberDetailSheet({ memberId, onClose }: MemberDetailShe
                 >
                   <ArrowUpCircle className="h-4 w-4 mr-2" />
                   Propose Promotion
+                </Button>
+              )}
+              
+              {canSetLevelDirectly && (
+                <Button 
+                  className="w-full" 
+                  variant="default" 
+                  onClick={() => setIsSetLevelDialogOpen(true)}
+                  data-testid="button-set-level-directly-sheet"
+                >
+                  <Shield className="h-4 w-4 mr-2" />
+                  Set Level Directly
                 </Button>
               )}
               
@@ -534,6 +602,79 @@ export default function MemberDetailSheet({ memberId, onClose }: MemberDetailShe
                 data-testid="button-submit-demotion"
               >
                 {createPromotionMutation.isPending ? "Submitting..." : "Submit Demotion Proposal"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={isSetLevelDialogOpen} onOpenChange={setIsSetLevelDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Set Level Directly</DialogTitle>
+              <DialogDescription>
+                As a Level 5 member, you can directly set levels for members below Level 5 without voting.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="flex items-center gap-3 p-3 bg-muted rounded-md">
+                <UserAvatar
+                  name={displayName}
+                  imageUrl={member?.profileImageUrl || undefined}
+                  level={member?.level as 1 | 2 | 3 | 4 | 5}
+                  size="sm"
+                />
+                <div>
+                  <p className="font-medium text-sm">{displayName}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Currently Level {member?.level}
+                    {selectedDirectLevel && ` → Level ${selectedDirectLevel}`}
+                  </p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Set New Level</Label>
+                <Select value={selectedDirectLevel} onValueChange={setSelectedDirectLevel}>
+                  <SelectTrigger data-testid="select-direct-level-sheet">
+                    <SelectValue placeholder="Select level" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableDirectLevels.map(level => (
+                      <SelectItem key={level} value={level.toString()}>
+                        Level {level}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Reason</Label>
+                <Textarea
+                  placeholder="Explain why you're setting this level..."
+                  value={directLevelReason}
+                  onChange={(e) => setDirectLevelReason(e.target.value)}
+                  rows={3}
+                  data-testid="input-direct-level-reason-sheet"
+                />
+                <p className="text-xs text-muted-foreground">{directLevelReason.length}/500 characters</p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => { setIsSetLevelDialogOpen(false); setSelectedDirectLevel(""); setDirectLevelReason(""); }}>
+                Cancel
+              </Button>
+              <Button 
+                onClick={() => {
+                  if (!member || !selectedDirectLevel || directLevelReason.length < 10) return;
+                  setLevelDirectlyMutation.mutate({
+                    userId: member.id,
+                    newLevel: parseInt(selectedDirectLevel, 10),
+                    reason: directLevelReason,
+                  });
+                }}
+                disabled={!selectedDirectLevel || directLevelReason.length < 10 || setLevelDirectlyMutation.isPending}
+                data-testid="button-submit-direct-level-sheet"
+              >
+                {setLevelDirectlyMutation.isPending ? "Setting..." : "Set Level"}
               </Button>
             </DialogFooter>
           </DialogContent>

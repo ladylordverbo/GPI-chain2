@@ -839,7 +839,8 @@ export async function registerRoutes(
           return {
             ...details,
             candidate: details.candidate ? sanitizeUser(details.candidate, requestingUser.level) : null,
-            proposer: details.proposer ? sanitizeUser(details.proposer, requestingUser.level) : null,
+            createdBy: details.createdBy ? sanitizeUser(details.createdBy, requestingUser.level) : null,
+            proposer: details.proposer ? sanitizeUser(details.proposer, requestingUser.level) : null, // Keep for backward compatibility
             votes: visibleVotes,
             votesFor: visibleVotes.filter((v: any) => v.vote === "for").length,
             votesAgainst: visibleVotes.filter((v: any) => v.vote === "against").length,
@@ -847,9 +848,9 @@ export async function registerRoutes(
         })
       );
       
-      // Filter out any requests where candidate or proposer couldn't be resolved
+      // Filter out any requests where candidate or createdBy couldn't be resolved
       const validRequests = requestsWithDetails.filter(r => 
-        r !== null && r.candidate !== null && r.proposer !== null
+        r !== null && r.candidate !== null && r.createdBy !== null
       );
       res.json(validRequests);
     } catch (error) {
@@ -887,7 +888,8 @@ export async function registerRoutes(
       res.json({
         ...request,
         candidate: request.candidate ? sanitizeUser(request.candidate, requestingUser.level) : null,
-        proposer: request.proposer ? sanitizeUser(request.proposer, requestingUser.level) : null,
+        createdBy: request.createdBy ? sanitizeUser(request.createdBy, requestingUser.level) : null,
+        proposer: request.proposer ? sanitizeUser(request.proposer, requestingUser.level) : null, // Keep for backward compatibility
         votes: visibleVotes,
         votesFor: visibleVotes.filter((v: any) => v.vote === "for").length,
         votesAgainst: visibleVotes.filter((v: any) => v.vote === "against").length,
@@ -1047,7 +1049,7 @@ export async function registerRoutes(
       // Process votes (check if request should be approved)
       const updatedRequest = await storage.processPromotionVotes(promotionId);
       
-      res.json({ success: true, requestStatus: updatedRequest.status });
+      res.json({ success: true, promotionStatus: updatedRequest.status });
     } catch (error) {
       console.error("Error voting:", error);
       if (error instanceof z.ZodError) {

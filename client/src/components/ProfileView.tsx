@@ -45,12 +45,15 @@ export default function ProfileView() {
   const [isPromoteDialogOpen, setIsPromoteDialogOpen] = useState(false);
   const [isEditUsernameOpen, setIsEditUsernameOpen] = useState(false);
   const [isSelfDemoteDialogOpen, setIsSelfDemoteDialogOpen] = useState(false);
+  const [isSetLevelDialogOpen, setIsSetLevelDialogOpen] = useState(false);
   const [newUsername, setNewUsername] = useState("");
   const [debouncedUsername, setDebouncedUsername] = useState("");
   const [selectedMember, setSelectedMember] = useState<string>("");
   const [selectedLevel, setSelectedLevel] = useState<string>("");
+  const [selectedDirectLevel, setSelectedDirectLevel] = useState<string>("");
   const [selectedDemoteLevel, setSelectedDemoteLevel] = useState<string>("");
   const [justification, setJustification] = useState("");
+  const [directLevelReason, setDirectLevelReason] = useState("");
   const [demoteReason, setDemoteReason] = useState("");
   const { toast } = useToast();
   const { user: authUser, isLoading: authLoading } = useAuth();
@@ -119,6 +122,48 @@ export default function ProfileView() {
       toast({
         title: "Failed to Create Promotion",
         description: error.message || "An error occurred",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const setLevelDirectlyMutation = useMutation({
+    mutationFn: async ({ userId, newLevel, reason }: { userId: string; newLevel: number; reason: string }) => {
+      const response = await apiRequest("POST", `/api/users/${userId}/level`, { newLevel, reason });
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ 
+        title: "Level Set Successfully", 
+        description: "The member's level has been updated directly."
+      });
+      setIsSetLevelDialogOpen(false);
+      setSelectedMember("");
+      setSelectedDirectLevel("");
+      setDirectLevelReason("");
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
+    },
+    onError: (error: any) => {
+      let errorMessage = "An error occurred";
+      
+      if (error.message) {
+        const match = error.message.match(/^\d+:\s*(.+)$/);
+        if (match) {
+          try {
+            const errorData = JSON.parse(match[1]);
+            errorMessage = errorData.message || errorMessage;
+          } catch {
+            errorMessage = match[1];
+          }
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      toast({
+        title: "Failed to Set Level",
+        description: errorMessage,
         variant: "destructive",
       });
     },
@@ -230,6 +275,11 @@ export default function ProfileView() {
 
   // Members eligible for promotion (lower level than proposer)
   const eligibleMembers = allUsers.filter(u => u.level < user.level && u.id !== user.id);
+  
+  // Members eligible for direct level setting (Level 5 only, users < Level 5)
+  const eligibleForDirectLevel = user.level === 5 
+    ? allUsers.filter(u => u.level < 5 && u.id !== user.id)
+    : [];
 
   return (
     <div className="space-y-6">
@@ -545,6 +595,100 @@ export default function ProfileView() {
                 </DialogFooter>
               </DialogContent>
             </Dialog>
+            
+            {user.level === 5 && eligibleForDirectLevel.length > 0 && (
+              <Dialog open={isSetLevelDialogOpen} onOpenChange={setIsSetLevelDialogOpen}>
+                <DialogTrigger asChild>
+                  <Button className="w-full" variant="default" data-testid="button-set-level-directly">
+                    <Shield className="h-4 w-4 mr-2" />
+                    Set Level Directly
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Set Level Directly</DialogTitle>
+                    <p className="text-sm text-muted-foreground">
+                      As a Level 5 member, you can directly set levels for members below Level 5 without voting.
+                    </p>
+                  </DialogHeader>
+                  <div className="space-y-4 py-4">
+                    <div className="space-y-2">
+                      <Label>Select Member</Label>
+                      <Select value={selectedMember} onValueChange={setSelectedMember}>
+                        <SelectTrigger data-testid="select-member-direct">
+                          <SelectValue placeholder="Choose a member" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {eligibleForDirectLevel.map(member => (
+                            <SelectItem key={member.id} value={member.id}>
+                              {member.username || `${member.firstName || ""} ${member.lastName || ""}`.trim() || member.email} (Level {member.level})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Set New Level</Label>
+                      <Select value={selectedDirectLevel} onValueChange={setSelectedDirectLevel}>
+                        <SelectTrigger data-testid="select-direct-level">
+                          <SelectValue placeholder="Select level" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {[1, 2, 3, 4].filter(l => {
+                            const candidate = allUsers.find(u => u.id === selectedMember);
+                            return candidate && l !== candidate.level;
+                          }).map(level => (
+                            <SelectItem key={level} value={level.toString()}>
+                              Level {level}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {selectedMember && selectedDirectLevel && (
+                        <p className="text-xs text-muted-foreground">
+                          {(() => {
+                            const candidate = allUsers.find(u => u.id === selectedMember);
+                            return candidate 
+                              ? `Level ${candidate.level} → Level ${selectedDirectLevel}`
+                              : "";
+                          })()}
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Reason</Label>
+                      <Textarea
+                        placeholder="Explain why you're setting this level..."
+                        value={directLevelReason}
+                        onChange={(e) => setDirectLevelReason(e.target.value)}
+                        rows={3}
+                        data-testid="input-direct-level-reason"
+                      />
+                      <p className="text-xs text-muted-foreground">{directLevelReason.length}/500 characters</p>
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setIsSetLevelDialogOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button 
+                      onClick={() => {
+                        if (!selectedMember || !selectedDirectLevel || directLevelReason.length < 10) return;
+                        setLevelDirectlyMutation.mutate({
+                          userId: selectedMember,
+                          newLevel: parseInt(selectedDirectLevel, 10),
+                          reason: directLevelReason,
+                        });
+                      }}
+                      disabled={!selectedMember || !selectedDirectLevel || directLevelReason.length < 10 || setLevelDirectlyMutation.isPending}
+                      data-testid="button-submit-direct-level"
+                    >
+                      {setLevelDirectlyMutation.isPending ? "Setting..." : "Set Level"}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            )}
           </CardContent>
         </Card>
       )}

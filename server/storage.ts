@@ -345,6 +345,17 @@ export class DatabaseStorage implements IStorage {
     const [createdBy] = await db.select().from(users).where(eq(users.id, request.createdByUserId));
     const requestVotes = await db.select().from(votes).where(eq(votes.promotionRequestId, id));
 
+    // Get voter user information for each vote
+    const votesWithVoters = await Promise.all(
+      requestVotes.map(async (vote) => {
+        const [voter] = await db.select().from(users).where(eq(users.id, vote.voterUserId));
+        return {
+          ...vote,
+          voter: voter || null,
+        };
+      })
+    );
+
     const votesFor = requestVotes.filter(v => v.vote === "for").length;
     const votesAgainst = requestVotes.filter(v => v.vote === "against").length;
 
@@ -352,7 +363,8 @@ export class DatabaseStorage implements IStorage {
       ...request,
       candidate,
       createdBy,
-      votes: requestVotes,
+      proposer: createdBy, // Alias for compatibility
+      votes: votesWithVoters,
       votesFor,
       votesAgainst,
     };
